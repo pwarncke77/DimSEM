@@ -1,0 +1,35 @@
+Package: DimSEM
+Title: Dimensionality-sensitive Structural Equation Modeling
+Version: 0.0.0.9000
+Authors@R: c(
+    person("Philip", "Warncke", role = c("aut", "cre"), email = "philip.warncke@ul.ie")
+  )
+Description: Runs dimensionality-detection procedures and proposes
+    dimensionality-sensitive item-to-latent-variable measurement schematics for
+    later structural equation modeling.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Depends:
+    R (>= 4.1.0)
+Imports:
+    grid,
+    igraph,
+    stats,
+    utils,
+    EGAnet,
+    ggraph,
+    lavaan,
+    ggplot2,
+    psych,
+    doSNOW,
+    qgraph
+Suggests:
+    ggforce,
+    cmdstanr,
+    foreach,
+    parallel,
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
+LazyData: true

@@ -24,12 +24,14 @@ Imports:
     ggplot2,
     psych,
     doSNOW,
+    foreach,
+    parallel,
     qgraph
 Suggests:
     ggforce,
     cmdstanr,
-    foreach,
-    parallel,
+    posterior,
     testthat (>= 3.0.0)
+Additional_repositories: https://stan-dev.r-universe.dev
 Config/testthat/edition: 3
 LazyData: true

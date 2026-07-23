@@ -20,7 +20,7 @@
 #'   a named list mapping latent names to character vectors of covariates, e.g.
 #'   `list(G1 = c("age", "educ"), F2 = "age")`.
 #' @param model_syntax Optional complete lavaan-style model syntax. When
-#'   supplied, it OVERRIDES the syntax generated from the proposal entirely
+#'   supplied, it overides the syntax generated from the proposal entirely
 #'   (measurement, hyper, and structural parts); `covariates` and
 #'   `include_hyper` are then ignored for syntax construction (covariate
 #'   columns are still passed to the estimator).

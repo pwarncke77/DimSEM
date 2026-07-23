@@ -3,7 +3,7 @@
 # -----------------------------------------------------------------------------
 # Generates the three toy datasets shipped with DimSem:
 #
-#   toy_simple  : n = 200, 12 five-point Likert items, 3 latent factors
+#   toy_simple  : n = 400, 12 five-point Likert items, 3 latent factors
 #                 (r = .30 between all factor pairs). Items a:d -> F1,
 #                 e:h -> F2, i:l -> F3.
 #
@@ -22,7 +22,7 @@
 # Base R only -- no package dependencies.
 # =============================================================================
 
-set.seed(42)
+set.seed(123)
 
 # --- helpers -----------------------------------------------------------------
 
@@ -76,7 +76,7 @@ Phi_simple <- matrix(0.4, nrow = 3, ncol = 3)
 diag(Phi_simple) <- 1
 
 toy_simple <- make_factor_data(
-  n          = 200,
+  n          = 400,
   Phi        = Phi_simple,
   assign     = rep(1:3, each = 4),                 # a:d, e:h, i:l
   loadings   = rep(c(0.80, 0.75, 0.70, 0.65), 3),  # mixed loading strengths

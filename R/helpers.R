@@ -1993,7 +1993,10 @@
   use_par <- isTRUE(parallel) &&
     requireNamespace("foreach", quietly = TRUE) &&
     requireNamespace("doSNOW", quietly = TRUE) &&
-    requireNamespace("parallel", quietly = TRUE)
+    requireNamespace("parallel", quietly = TRUE) &&
+    # `%dopar%` must exist in the installed foreach namespace; guards
+    # against a broken/partial foreach installation.
+    exists("%dopar%", envir = asNamespace("foreach"), inherits = FALSE)
 
   if (isTRUE(parallel) && !use_par) {
     warning("`parallel_hyper = TRUE` requires the `foreach`, `doSNOW`, and ",
@@ -2021,14 +2024,24 @@
       NULL
     })
     b <- NULL  # silence R CMD check note for the foreach iterator
-    res_list <- foreach::foreach(
-      b = seq_len(n_perm),
-      .packages = "qgraph",
-      .export = character(0),
-      .noexport = character(0)
-    ) %dopar% {
+    # NOTE: `%dopar%` is an infix operator exported by foreach. Writing it
+    # bare requires foreach to be ATTACHED (library(foreach)); qualifying
+    # the surrounding foreach::foreach() call does NOT bring the operator
+    # into scope, so a bare `%dopar%` fails with "could not find function
+    # \"%dopar%\"" whenever the user has not attached foreach (or a package
+    # that attaches it, such as doSNOW). Calling the operator in prefix
+    # form via its namespace is attachment-independent and is the correct
+    # way to use it from inside a package.
+    `%op%` <- foreach::`%dopar%`
+    res_list <- `%op%`(
+      foreach::foreach(
+        b = seq_len(n_perm),
+        .packages = "qgraph",
+        .export = character(0),
+        .noexport = character(0)
+      ),
       perm_one(perm_idx[[b]])
-    }
+    )
     # Restore the sequential backend so a later call is unaffected.
     parallel::stopCluster(cl)
     on.exit()
@@ -2318,7 +2331,7 @@
                     paste(ref$orphans, collapse = ", "),
                     " left as stand-alone dimension(s).")
            } else {
-             " is supported (family-resemblance / ideology-like structure)."
+             " is supported (family-resemblance)."
            }, caveat)
   } else if (!is.na(effective) && effective == "multiple") {
     paste0("Multiple hyper-factors are supported: ",
@@ -2427,7 +2440,7 @@
 # covariate regressions.
 .dimsem_assemble_syntax <- function(spec, covariates = NULL,
                                     covariate_targets = "all",
-                                    hyper_loadings = "unity") {
+                                    hyper_loadings = "free") {
   parts <- c("# Measurement model (from dimsem_propose)",
              spec$measurement_syntax)
 
@@ -2436,7 +2449,7 @@
     parts <- c(parts, "", paste0(
       "# Hyper-factor level (",
       if (identical(hyper_loadings, "unity")) {
-        "unit loadings, free variance"
+        "unit loadings, free variance; Warncke & Azevedo, n.d."
       } else {
         "free loadings, variance fixed via std.lv"
       }, ")"))
@@ -2683,7 +2696,7 @@
 #     acceleration via cmdstanr's opencl_ids.
 .dimsem_stan_model <- function(likelihood = c("normal", "ordinal"),
                                n_hyper = 0L, n_cov = 0L,
-                               hyper_loadings = "unity",
+                               hyper_loadings = "free",
                                priors = list()) {
   likelihood <- match.arg(likelihood)
   has_hyper <- n_hyper > 0L
@@ -2960,7 +2973,7 @@ if (has_cov && has_hyper)
 .dimsem_stan_data <- function(spec, data, covariates = NULL,
                               covariate_targets = "all",
                               likelihood = "normal", grainsize = NULL,
-                              hyper_loadings = "unity",
+                              hyper_loadings = "free",
                               covariate_info = NULL,
                               sign_ref = NULL) {
   items <- names(spec$partition)[!is.na(spec$partition)]
@@ -3073,7 +3086,7 @@ if (has_cov && has_hyper)
 .dimsem_estimate_bayes <- function(spec, syntax, data, covariates = NULL,
                                    covariate_targets = "all",
                                    covariate_info = NULL,
-                                   hyper_loadings = "unity",
+                                   hyper_loadings = "free",
                                    bayes_args = list(),
                                    force_recompile = FALSE, seed = NULL,
                                    verbose = TRUE) {
@@ -3211,8 +3224,9 @@ if (has_cov && has_hyper)
 
 # GPU-friendly Stan program: fully vectorized likelihood, no reduce_sum.
 #
-# Rationale (cf. the matrix-based _lpmf pattern: Stan's OpenCL backend accelerates
-# LARGE vectorized lpdf/lpmf calls; per-entry scalar calls inside loops (or inside reduce_sum slices)
+# Rationale (cf. the matrix-based _lpmf pattern in the user's reference
+# programs): Stan's OpenCL backend accelerates LARGE vectorized lpdf/lpmf
+# calls; per-entry scalar calls inside loops (or inside reduce_sum slices)
 # trigger no OpenCL kernels and pay CPU<->GPU transfer for nothing. This
 # variant therefore expresses the entire observed-entries likelihood as
 #   normal : ONE vectorized normal_lpdf over all n_obs entries, with the
@@ -3226,7 +3240,7 @@ if (has_cov && has_hyper)
 # over observations.
 .dimsem_stan_model_gpu <- function(likelihood = c("normal", "ordinal"),
                                    n_hyper = 0L, n_cov = 0L,
-                                   hyper_loadings = "unity",
+                                   hyper_loadings = "free",
                                    priors = list()) {
   likelihood <- match.arg(likelihood)
   has_hyper <- n_hyper > 0L
@@ -3562,7 +3576,7 @@ if (has_cov && has_hyper)
 # subscripts. Depends only on the estimation spec and covariate set, so it
 # is cheap to store on the fitted object.
 .dimsem_stan_param_map <- function(spec, covariates = NULL,
-                                   hyper_loadings = "unity") {
+                                   hyper_loadings = "free") {
   items <- names(spec$partition)[!is.na(spec$partition)]
   part <- spec$partition[items]
   latent_labels <- paste0("F", sort(unique(part)))
@@ -3928,5 +3942,118 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95) {
   out <- do.call(rbind, rows)
   rownames(out) <- NULL
   attr(out, "prob") <- prob
+  out
+}
+
+
+# --- Item-level orphan audit -------------------------------------------------------
+#
+# Community-detection algorithms produce COMPLETE partitions of connected
+# nodes: EGA leaves an item unassigned (NA) only when it is fully isolated
+# (degree 0), and a weakly connected item -- even a degree-1 pendant with a
+# hairline regularized edge -- is always absorbed into some community.
+# That is a structural property of modularity-based detection, not a bug,
+# but it means partition membership alone is no evidence that an item
+# belongs anywhere. This audit validates each item's membership in its
+# assigned community and converts failures to unassigned orphans (NA),
+# mirroring the Stage-B stray-eviction logic at the hyper level. It is
+# source-agnostic: it applies to the SELECTED partition regardless of
+# whether it came from EGA, PA, or EKC.
+#
+# Methods:
+#   "permutation" (default): the marginal item-to-community mass
+#     M_i = sum_{j in c(i)} |r_ij| is compared against a column-permutation
+#     null (permuting item i's rows destroys its dependence with everything
+#     while preserving its marginal distribution). An item is retained iff
+#     its association beats chance at `alpha`. Exact, assumption-free, and
+#     consistent with the package's other permutation machinery.
+#   "loading": the item's standardized network loading on its own
+#     community must reach `min_loading` (default 0.15, the small-effect
+#     benchmark for network loadings; Christensen & Golino, 2021).
+#
+# After eviction, communities left with fewer than `min_community_size`
+# items are dissolved to orphans as well (the three-indicator rule).
+.dimsem_orphan_audit <- function(data, network_matrix, partition,
+                                 orphan_args = list(), seed = NULL) {
+  method <- match.arg(orphan_args$method %||% "permutation",
+                      c("permutation", "loading", "none"))
+  out <- list(method = method, table = NULL, orphaned = character(0),
+              dissolved = character(0), partition = partition)
+  if (identical(method, "none")) {
+    return(out)
+  }
+  alpha <- orphan_args$alpha %||% 0.05
+  n_perm <- orphan_args$n_perm %||% 200L
+  min_loading <- orphan_args$min_loading %||% 0.15
+  min_size <- orphan_args$min_community_size %||% 3L
+
+  part <- partition[!is.na(partition)]
+  items <- names(part)
+  if (length(items) < 2) {
+    return(out)
+  }
+
+  if (identical(method, "permutation")) {
+    X <- as.matrix(data[, items, drop = FALSE])
+    storage.mode(X) <- "numeric"
+    R <- suppressWarnings(stats::cor(X, use = "pairwise.complete.obs"))
+    R[!is.finite(R)] <- 0
+    if (!is.null(seed)) {
+      set.seed(seed)
+    }
+    tab <- do.call(rbind, lapply(items, function(it) {
+      members <- setdiff(items[part == part[it]], it)
+      if (length(members) == 0) {
+        return(data.frame(item = it, community = part[it],
+                          statistic = 0, p = 1, keep = FALSE,
+                          stringsAsFactors = FALSE))
+      }
+      M_obs <- sum(abs(R[it, members]))
+      xi <- X[, it]
+      null <- vapply(seq_len(n_perm), function(b) {
+        xp <- xi[sample.int(length(xi))]
+        r <- suppressWarnings(stats::cor(xp, X[, members, drop = FALSE],
+                                         use = "pairwise.complete.obs"))
+        r[!is.finite(r)] <- 0
+        sum(abs(r))
+      }, numeric(1))
+      p <- (1 + sum(null >= M_obs)) / (1 + n_perm)
+      data.frame(item = it, community = part[it], statistic = M_obs,
+                 p = p, keep = p < alpha, stringsAsFactors = FALSE)
+    }))
+  } else {
+    L <- .dimsem_network_loadings(network_matrix, partition)
+    own <- vapply(items, function(it) {
+      L[it, paste0("F", part[it])]
+    }, numeric(1))
+    tab <- data.frame(item = items, community = part[items],
+                      statistic = own, p = NA_real_,
+                      keep = abs(own) >= min_loading,
+                      stringsAsFactors = FALSE)
+  }
+
+  out$table <- tab
+  evicted <- tab$item[!tab$keep]
+  new_part <- partition
+  new_part[evicted] <- NA_integer_
+
+  # Cascade: dissolve communities that fell below the identification floor.
+  sizes <- table(new_part[!is.na(new_part)])
+  small <- as.integer(names(sizes)[sizes < min_size])
+  dissolved <- character(0)
+  if (length(small) > 0) {
+    dissolved <- names(new_part)[!is.na(new_part) & new_part %in% small]
+    new_part[names(new_part) %in% dissolved] <- NA_integer_
+  }
+  # Relabel surviving communities consecutively.
+  if (any(!is.na(new_part))) {
+    keep_vals <- sort(unique(new_part[!is.na(new_part)]))
+    new_part[!is.na(new_part)] <- as.integer(factor(
+      new_part[!is.na(new_part)], levels = keep_vals))
+  }
+
+  out$orphaned <- evicted
+  out$dissolved <- dissolved
+  out$partition <- new_part
   out
 }

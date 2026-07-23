@@ -178,6 +178,29 @@
 #'   which resolves to `parallel::detectCores() - 1`, leaving one core for
 #'   background tasks. The value is clamped to the number of available
 #'   cores and never exceeds the number of permutation replicates.
+#' @param audit_orphans Logical; if `TRUE` (default), validate every item's
+#'   membership in its assigned community AFTER partition selection, and
+#'   convert failures to unassigned orphans (`NA`). Community-detection
+#'   algorithms return complete partitions of connected nodes: EGA assigns
+#'   `NA` only to fully isolated items, so a weakly connected item -- even
+#'   a single hairline regularized edge -- is always absorbed into some
+#'   community regardless of seed. The audit is therefore applied to the
+#'   selected partition irrespective of its source (EGA, PA, or EKC).
+#'   Orphaned items are excluded from the proposed measurement syntax, SEM
+#'   schematic, and hyper-structure evaluation; details are stored in the
+#'   `orphan_audit` element.
+#' @param orphan_args Optional named list controlling the audit. `method`:
+#'   `"permutation"` (default) retains an item only if its marginal
+#'   item-to-community correlation mass beats a column-permutation null at
+#'   `alpha` (default .05; `n_perm`, default 200, permutations; exact and
+#'   assumption-free, consistent with the hyper-level machinery);
+#'   `"loading"` retains an item only if its standardized network loading
+#'   on its own community reaches `min_loading` (default 0.15, the
+#'   small-effect benchmark of Christensen & Golino, 2021); `"none"`
+#'   disables the audit. After eviction, communities left with fewer than
+#'   `min_community_size` (default 3) items are dissolved to orphans as
+#'   well, consistent with the three-indicator identification rule used
+#'   throughout the package.
 #' @param make_plots Logical. If `TRUE`, create a community/network plot and a
 #'   simple directed SEM schematic.
 #' @param plot_args Optional named list controlling plotting. Currently supports
@@ -231,6 +254,8 @@ DimSEM_propose <- function(data,
                            cfa_args = list(),
                            propose_hyper = TRUE,
                            hyper_args = list(),
+                           audit_orphans = TRUE,
+                           orphan_args = list(),
                            parallel_hyper = TRUE,
                            parallel_hyper_ncores = NULL,
                            make_plots = TRUE,
@@ -290,6 +315,42 @@ DimSEM_propose <- function(data,
     selected_source = selected_source
   )
 
+  orphan_audit <- NULL
+  if (isTRUE(audit_orphans) && any(!is.na(selected$partition))) {
+    if (isTRUE(verbose)) {
+      message("Auditing item-community memberships (",
+              orphan_args$method %||% "permutation", ")...")
+    }
+    orphan_audit <- .dimsem_orphan_audit(
+      data = x$data,
+      network_matrix = network_matrix,
+      partition = selected$partition,
+      orphan_args = orphan_args,
+      seed = seed
+    )
+    if (length(c(orphan_audit$orphaned, orphan_audit$dissolved)) > 0) {
+      selected$partition <- orphan_audit$partition
+      selected$partition_table <- .dimsem_partition_table(
+        x$item_names, selected$partition)
+      selected$model_syntax <- .dimsem_model_syntax(selected$partition_table)
+      selected$n_dim <- length(unique(
+        selected$partition[!is.na(selected$partition)]))
+      if (isTRUE(verbose)) {
+        message("Orphan audit: unassigned ",
+                length(orphan_audit$orphaned), " item(s)",
+                if (length(orphan_audit$dissolved) > 0) {
+                  paste0(" and dissolved ",
+                         length(unique(orphan_audit$partition[
+                           orphan_audit$dissolved])),
+                         " sub-threshold community(ies)")
+                } else "",
+                ": ",
+                paste(c(orphan_audit$orphaned, orphan_audit$dissolved),
+                      collapse = ", "), ".")
+      }
+    }
+  }
+
   cfa_source <- match.arg(cfa_source)
   cfa <- NULL
   if (isTRUE(fit_cfa)) {
@@ -346,6 +407,7 @@ DimSEM_propose <- function(data,
     results = results,
     selected = selected,
     cfa = cfa,
+    orphan_audit = orphan_audit,
     hyper = hyper,
     plots = plots,
     graphs = graphs,
@@ -441,6 +503,12 @@ print.DimSEM_proposal <- function(x, ...) {
   }
 
   cat("\nItem allocation:\n")
+  if (!is.null(x$orphan_audit) &&
+      length(c(x$orphan_audit$orphaned, x$orphan_audit$dissolved)) > 0) {
+    cat("\nOrphan audit (", x$orphan_audit$method, "): unassigned items: ",
+        paste(c(x$orphan_audit$orphaned, x$orphan_audit$dissolved),
+              collapse = ", "), "\n", sep = "")
+  }
   print(x$selected$partition_table, row.names = FALSE)
 
   invisible(x)

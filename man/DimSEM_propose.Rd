@@ -148,45 +148,32 @@ proposed level-1 dimensions warrant one or more second-order
 are stored in the \code{hyper} element of the returned object.}
 
 \item{hyper_args}{Optional named list controlling the hyper-structure
-evaluation. \code{method} selects the strategy: \code{"tga"} runs a two-level
-adaptation of Taxonomic Graph Analysis (Samo et al., 2025): network
-loadings and scores are computed from the level-1 network and partition
-(Christensen et al., 2025; Golino et al., 2022), a level-2 EBICglasso
-network is estimated on the score correlations, lower-order Louvain
-community detection with most-common consensus identifies level-2
-communities (Blondel et al., 2008; Jimenez et al., 2023; Lancichinetti
-& Fortunato, 2012), and the unidim index (Revelle & Condon, 2025)
-statistically gates the single-hyper-factor verdict. \code{"permutation"}
-runs a permutation-validated higher-order Louvain: the null hypothesis
-that level-1 communities are mutually independent conditional on their
-internal structure is simulated exactly by permuting data rows
-independently within each community's column block; the
-between-community edge mass of the re-estimated regularized network
-(the between-community component of the weighted-modularity numerator)
-is the test statistic; BH-FDR-validated community pairs form a
-meta-graph on which Louvain consensus identifies hyper-blocks, with
-unconnected dimensions remaining stand-alone. \code{"both"} (default) runs
-the two strategies and reports their agreement. Further options:
-\code{n_perm} permutations (default: adaptive,
-\code{max(500, ceiling(2 * n_pairs / alpha))}, so that a single true
-between-community connection can survive FDR correction);
-\code{alpha} (default .05) FDR level
-and omnibus gate; \code{min_block_size} (default 3) the minimum number of
-level-1 dimensions required to support a hyper-factor -- a hyper-factor
-over two dimensions is an exact, zero-df reparameterization of their
-correlation and hence unfalsifiable, so validated groupings below this
-size are reported as correlated level-1 dimensions instead;
-\code{member_rule} (\code{"majority"}, the default, or \code{"all"}) the
-family-resemblance membership criterion in the permutation strategy: a
-dimension is retained in a candidate hyper-community only if its
+evaluation, which uses a permutation-validated higher-order Louvain:
+the null hypothesis that level-1 communities are mutually independent
+conditional on their internal structure is simulated exactly by
+permuting data rows independently within each community's column
+block; the between-community edge mass of the re-estimated
+regularized network (the between-community component of the
+weighted-modularity numerator) is the test statistic; BH-FDR-validated
+community pairs form a meta-graph on which Louvain consensus
+clustering identifies hyper-blocks, with unconnected dimensions
+remaining stand-alone. Options: \code{n_perm} permutations (default:
+adaptive, \code{max(500, ceiling(2 * n_pairs / alpha))}, so that a single
+true between-community connection can survive FDR correction);
+\code{alpha} (default .05) FDR level and omnibus gate; \code{min_block_size}
+(default 3) the minimum number of level-1 dimensions required to
+support a hyper-factor -- a hyper-factor over two dimensions is an
+exact, zero-df reparameterization of their correlation and hence
+unfalsifiable, so validated groupings below this size are reported as
+correlated level-1 dimensions instead; \code{member_rule} (\code{"majority"},
+the default, or \code{"all"}) the family-resemblance membership criterion:
+a dimension is retained in a candidate hyper-community only if its
 MARGINAL between-dimension dependence with the required share of
-co-members is individually permutation-validated, with weakly attached
-"stray" dimensions removed by backward elimination and reported in
-\verb{$hyper$permutation$evicted}; \code{u_hi}/\code{u_lo} (defaults .90/.50) unidim verdict
-thresholds per Revelle & Condon's simulations, with the interval
-between them reported as inconclusive; \code{consensus_reps} (default 500)
-Louvain consensus repetitions; \code{resolution} (default 1) Louvain
-resolution; \code{glasso_args} passed to \code{\link[qgraph:EBICglasso]{qgraph::EBICglasso()}} at level 2.}
+co-members is individually permutation-validated, with weakly
+attached "stray" dimensions removed by backward elimination and
+reported in \verb{$hyper$permutation$evicted}; \code{consensus_reps} (default
+500) Louvain consensus repetitions; \code{resolution} (default 1) Louvain
+resolution; \code{glasso_args} passed to \code{\link[qgraph:EBICglasso]{qgraph::EBICglasso()}}.}
 
 \item{audit_orphans}{Logical; if \code{TRUE} (default), validate every item's
 membership in its assigned community AFTER partition selection, and
@@ -216,7 +203,7 @@ throughout the package.}
 \item{parallel_hyper}{Logical. If \code{TRUE} (default), evaluate the
 permutation replicates of the hyper-structure test in parallel on a
 \code{doSNOW} cluster. The permutation loop is the dominant cost of
-\code{DimSem_propose()} (each replicate re-estimates an \code{\link[qgraph:EBICglasso]{qgraph::EBICglasso()}}
+\code{DimSEM_propose()} (each replicate re-estimates an \code{\link[qgraph:EBICglasso]{qgraph::EBICglasso()}}
 network, and the default \code{n_perm} grows with the number of level-1
 dimension pairs), and replicates are mutually independent, so the
 speed-up is close to linear in the number of cores. Requires the
@@ -226,9 +213,7 @@ with a warning. RESULTS ARE UNAFFECTED: all permutation indices are
 drawn serially from the master RNG stream before any work is
 dispatched, and workers perform no random number generation, so the
 output for a given \code{seed} is bit-identical to serial evaluation
-regardless of \code{parallel_hyper} or the number of cores. The TGA strategy
-is not parallelized (it fits a single level-2 network and is cheap by
-comparison).}
+regardless of \code{parallel_hyper} or the number of cores.}
 
 \item{parallel_hyper_ncores}{Integer or \code{NULL}. Number of worker
 processes to use when \code{parallel_hyper = TRUE}. Defaults to \code{NULL},
@@ -253,7 +238,7 @@ elements:
 \item{results}{Raw and summarized method-specific results for EGA, PA, and/or EKC. PA/EKC results include their graph-partition item allocations.}
 \item{selected}{The selected partition source, dimension count, item partition table, and lavaan-style measurement syntax.}
 \item{cfa}{When \code{fit_cfa = TRUE}: the partition source used, the model syntax, the fitted \code{\link[lavaan:cfa]{lavaan::cfa()}} object (\code{fit}), a convergence flag, the inter-factor correlation matrix (\code{factor_cor}), and selected fit measures. \code{NULL} when \code{fit_cfa = FALSE}.}
-\item{hyper}{When \code{propose_hyper = TRUE}: per-strategy hyper-structure results (verdict, hyper-blocks, stand-alone dimensions, unidim values, permutation pair table and global p-value), an agreement flag, and a plain-language recommendation. \code{NULL} when \code{propose_hyper = FALSE}.}
+\item{hyper}{When \code{propose_hyper = TRUE}: the hyper-structure result (verdict, hyper-blocks, stand-alone dimensions, evicted strays, permutation pair table and global p-value) and a plain-language recommendation. \code{NULL} when \code{propose_hyper = FALSE}.}
 \item{plots}{A list containing \code{network} and \code{sem} ggplot/ggraph objects when \code{make_plots = TRUE}.}
 \item{graphs}{Underlying igraph objects for the item network and SEM schematic.}
 \item{data_info}{Basic information about the analyzed item matrix.}

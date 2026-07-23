@@ -7,7 +7,7 @@
 DimSEM_posterior(object, pars = c("core", "all"), prob = 0.95)
 }
 \arguments{
-\item{object}{A \code{"DimSem_estimate"} object fitted with \code{engine = "bayes"}.}
+\item{object}{A \code{"DimSEM_estimate"} object fitted with \code{engine = "bayes"}.}
 
 \item{pars}{\code{"core"} (default: loadings, structural, hyper) or \code{"all"}
 (adds item intercepts and residual SDs).}

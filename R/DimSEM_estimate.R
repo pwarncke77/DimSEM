@@ -7,7 +7,7 @@
 #' loadings, following the family-resemblance convention), and external
 #' covariates regressed onto the latent variables.
 #'
-#' @param proposal A `"DimSem_proposal"` object from [DimSEM_propose()].
+#' @param proposal A `"DimSEM_proposal"` object from [DimSEM_propose()].
 #' @param data The data set the proposal was derived from (the proposal
 #'   object does not store raw data). Must contain all analyzed item
 #'   columns and any requested covariates. Row count is checked against
@@ -44,8 +44,7 @@
 #'   returned object.
 #' @param include_hyper Logical; include the proposed hyper-factor level
 #'   (default `TRUE`). Hyper blocks are taken from the permutation strategy
-#'   when available, otherwise TGA (permutation is the stricter inferential
-#'   criterion and takes priority in disagreements). Hyper loadings are
+#'   when the permutation test validates them. Hyper loadings are
 #'   fixed to 1 with a freely estimated hyper-factor variance, following
 #'   the family-resemblance convention; with standardized first-order
 #'   disturbances this implies the compound-symmetry structure discussed in

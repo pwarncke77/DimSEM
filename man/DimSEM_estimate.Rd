@@ -25,7 +25,7 @@ DimSEM_estimate(
 )
 }
 \arguments{
-\item{proposal}{A \code{"DimSem_proposal"} object from \code{\link[=DimSEM_propose]{DimSEM_propose()}}.}
+\item{proposal}{A \code{"DimSEM_proposal"} object from \code{\link[=DimSEM_propose]{DimSEM_propose()}}.}
 
 \item{data}{The data set the proposal was derived from (the proposal
 object does not store raw data). Must contain all analyzed item
@@ -49,8 +49,7 @@ columns are still passed to the estimator).}
 
 \item{include_hyper}{Logical; include the proposed hyper-factor level
 (default \code{TRUE}). Hyper blocks are taken from the permutation strategy
-when available, otherwise TGA (permutation is the stricter inferential
-criterion and takes priority in disagreements). Hyper loadings are
+when the permutation test validates them. Hyper loadings are
 fixed to 1 with a freely estimated hyper-factor variance, following
 the family-resemblance convention; with standardized first-order
 disturbances this implies the compound-symmetry structure discussed in

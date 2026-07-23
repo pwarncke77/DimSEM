@@ -948,49 +948,18 @@
 
 # --- graphs & plots ---------------------------------------------------------------
 
-# Choose the hyper result used for plotting.
-#
-# Plotting priority rule:
-#   1. permutation / higher-order Louvain whenever available
-#   2. TGA only when permutation was not run
-#
-# This means that if TGA and permutation disagree, the plot follows the
-# permutation/higher-order Louvain solution. This helper is plotting-only;
-# it does not alter the hyper proposal object or recommendation logic.
+# Resolve the hyper result used by the plotting and estimation paths.
+# Returns NULL when no hyper structure was proposed or validated.
 .dimsem_hyper_plot_result <- function(hyper) {
-  if (is.null(hyper)) {
+  if (is.null(hyper) || is.null(hyper$permutation)) {
     return(NULL)
   }
-
-  if (!is.null(hyper$permutation)) {
-    res <- hyper$permutation
-    source <- "permutation"
-  } else if (!is.null(hyper$tga)) {
-    res <- hyper$tga
-    source <- "tga"
-  } else {
+  res <- hyper$permutation
+  if (is.null(res$blocks) || length(res$blocks) == 0) {
     return(NULL)
   }
-
-  blocks <- res$blocks %||% list()
-
-  if (length(blocks) > 0L) {
-    empty <- vapply(blocks, length, integer(1)) == 0L
-    blocks <- blocks[!empty]
-  }
-
-  if (length(blocks) > 0L &&
-      (is.null(names(blocks)) || anyNA(names(blocks)) ||
-       any(names(blocks) == ""))) {
-    names(blocks) <- paste0("G", seq_along(blocks))
-  }
-
-  list(
-    source = source,
-    verdict = res$verdict %||% NA_character_,
-    blocks = blocks,
-    result = res
-  )
+  list(blocks = res$blocks, orphans = res$orphans, source = "permutation",
+       verdict = res$verdict)
 }
 
 .dimsem_factor_hyper_membership <- function(latent_names, hyper) {
@@ -1471,45 +1440,27 @@
   min(ncores, avail, max(1L, n_tasks))
 }
 
-# Hyper-dimensional (level-2) structure proposal for dimsem ---------------------
+# Hyper-dimensional (level-2) structure proposal for DimSEM ---------------------
 #
-# Two network-psychometric strategies for deciding whether the level-1 item
-# partition warrants one or more "hyper-factors" (second-order dimensions):
+# Statistical validation of hyper-dimensional (level-2) structure.
 #
-#   (1) "tga": a two-level adaptation of Taxonomic Graph Analysis (Samo,
-#       Garrido, Abad, Golino, McAbee, & Christensen, 2025, European Journal
-#       of Personality). Network loadings (Christensen, Golino, Abad, &
-#       Garrido, 2025) are computed from the level-1 network and partition,
-#       network scores (Golino et al., 2022) are correlated, a level-2
-#       network is estimated on the scores, and lower-order Louvain community
-#       detection (Blondel et al., 2008; Jimenez et al., 2023) with
-#       "most common" consensus clustering (Lancichinetti & Fortunato, 2012;
-#       Golino & Christensen, 2025) identifies level-2 communities. Whether a
-#       single top-level dimension is statistically supported is evaluated
-#       with the unidim index (Revelle & Condon, 2025).
-#       NOTE: this borrows TGA's hierarchical core only. Full TGA includes
-#       item-hygiene steps (UVA for local dependence, riEGA for wording
-#       effects) and bootstrap robustness checks that are out of scope here;
-#       users can pre-clean items with EGAnet before calling dimsem_propose().
-#
-#   (2) "permutation": a statistically validated higher-order Louvain. The
-#       null hypothesis is that level-1 communities are MUTUALLY INDEPENDENT
-#       conditional on their internal structure. This null is simulated
-#       exactly and nonparametrically by permuting data rows independently
-#       within each community's column block, which preserves every
-#       community's internal joint distribution while destroying all
-#       between-community dependence. The test statistic for each community
-#       pair is the between-community edge mass of the re-estimated
-#       regularized network, S_cd = sum_{i in c, j in d} |w_ij| -- i.e., the
-#       between-community component of the weighted-modularity numerator.
-#       Pairs whose observed S_cd exceeds the permutation null (BH-FDR
-#       corrected) form the weighted edges of a meta-graph over communities;
-#       Louvain consensus on this meta-graph yields the hyper-blocks, and
-#       communities with no validated edges remain stand-alone ("orphans").
-#       A global permutation p-value on the total between-community edge
-#       mass acts as an omnibus gate.
+# The null hypothesis is that the level-1 communities are MUTUALLY
+# INDEPENDENT conditional on their internal structure. This null is
+# simulated exactly and nonparametrically by permuting data rows
+# independently within each community's column block, which preserves
+# every community's internal joint distribution while destroying all
+# between-community dependence. The test statistic for each community
+# pair is the between-community edge mass of the re-estimated regularized
+# network, S_cd = sum_{i in c, j in d} |w_ij| -- the between-community
+# component of the weighted-modularity numerator. Pairs whose observed
+# S_cd exceeds the permutation null (BH-FDR corrected) form the weighted
+# edges of a meta-graph over communities; Louvain consensus clustering on
+# that meta-graph (Blondel et al., 2008; Lancichinetti & Fortunato, 2012)
+# yields the hyper-blocks, and communities with no validated edges remain
+# stand-alone ("orphans"). A global permutation p-value on the total
+# between-community edge mass acts as an omnibus gate.
 
-# --- network loadings & scores --------------------------------------------------
+# --- Network loadings ----------------------------------------------------------
 
 # Signed, standardized network loadings (Christensen & Golino, 2021;
 # Christensen et al., 2025). Unstandardized loading of node i on community c
@@ -1549,99 +1500,8 @@
   L_std * sgn
 }
 
-# Network scores (Golino et al., 2022): standardized data weighted by each
-# item's loading on its ASSIGNED community only, then re-standardized.
-.dimsem_network_scores <- function(data, network_matrix, partition) {
-  part <- partition[!is.na(partition)]
-  comms <- sort(unique(part))
-  items <- names(part)
 
-  L <- .dimsem_network_loadings(network_matrix, partition)
-  Z <- scale(as.matrix(data[, items, drop = FALSE]))
-  # scale() maps a zero-variance column to NaN; those carry no information
-  # and are set to the (standardized) mean of 0. Genuine NAs are NOT
-  # touched here -- they are handled per-respondent below, so that
-  # incomplete rows are neither deleted nor silently mean-imputed.
-  zero_var <- vapply(seq_len(ncol(Z)), function(j) {
-    all(is.na(Z[, j])) || (stats::sd(data[[items[j]]], na.rm = TRUE) %in% c(0, NA))
-  }, logical(1))
-  if (any(zero_var)) {
-    Z[, zero_var] <- 0
-  }
 
-  scores <- sapply(seq_along(comms), function(k) {
-    members <- items[part == comms[k]]
-    Zm <- Z[, members, drop = FALSE]
-    w <- L[members, k]
-    obs <- !is.na(Zm)
-    # Weighted sum over observed items, rescaled by the share of loading
-    # mass observed for that respondent (|w| in the denominator keeps the
-    # rescaling sign-safe for negatively loading items).
-    num <- as.numeric(replace(Zm, !obs, 0) %*% w)
-    den <- as.numeric(obs %*% abs(w))
-    total <- sum(abs(w))
-    out <- ifelse(den > 0, num * (total / pmax(den, .Machine$double.eps)), NA_real_)
-    out
-  })
-  scores <- matrix(scores, ncol = length(comms),
-                   dimnames = list(NULL, paste0("F", comms)))
-  # Standardize using observed values only; constant/all-NA columns stay 0.
-  scores <- scale(scores)
-  const <- vapply(seq_len(ncol(scores)), function(j) all(!is.finite(scores[, j])),
-                  logical(1))
-  if (any(const)) {
-    scores[, const] <- 0
-  }
-  scores
-}
-
-# --- unidimensionality index ------------------------------------------------------
-
-# Internal implementation of the unidim index (Revelle & Condon, 2025):
-# u = tau * pc, the product of a tau-equivalence fit index (single factor,
-# equal loadings) and a congeneric fit index (single factor, free loadings),
-# both computed on the off-diagonal correlation structure. Values near 1
-# support unidimensionality; Revelle & Condon's simulations place strong
-# support around >= .90 and clear multidimensionality around <= .50.
-# psych::unidim() is the reference implementation; this internal version
-# avoids cross-version fragility and requires only psych::fa().
-.dimsem_unidim <- function(R) {
-  k <- ncol(R)
-  if (k < 2) {
-    return(NA_real_)
-  }
-  R[!is.finite(R)] <- 0
-  off <- upper.tri(R)
-  denom <- sum(R[off]^2)
-  if (denom < .Machine$double.eps) {
-    return(0)
-  }
-
-  # Congeneric component: single-factor (minres) implied correlations.
-  f <- tryCatch(
-    {
-      .dimsem_require_namespace("psych")
-      fa1 <- suppressWarnings(psych::fa(R, nfactors = 1, fm = "minres",
-                                        warnings = FALSE))
-      as.numeric(fa1$loadings)
-    },
-    error = function(e) {
-      # Fallback: first eigenvector scaling.
-      e1 <- eigen(R, symmetric = TRUE)
-      as.numeric(e1$vectors[, 1] * sqrt(max(e1$values[1], 0)))
-    }
-  )
-  Rc <- tcrossprod(f)
-  pc <- 1 - sum((R - Rc)[off]^2) / denom
-
-  # Tau-equivalence component: equal loadings, lambda^2 = mean off-diagonal r
-  # (floored at 0; a negative manifold cannot be tau-equivalent).
-  lam2 <- max(mean(R[off]), 0)
-  Rt <- matrix(lam2, k, k)
-  tau <- 1 - sum((R - Rt)[off]^2) / denom
-
-  max(min(pc, 1), 0) * max(min(tau, 1), 0)
-}
 
 # --- Louvain with "most common" consensus ------------------------------------------
 
@@ -1690,178 +1550,11 @@
   )
 }
 
-# --- level-2 network ---------------------------------------------------------------
 
-# EBICglasso on the community-score correlation matrix. An EMPTY estimated
-# network is a substantive result (no conditional dependence between
-# communities), not an error. Estimation *failure* (small-d instability)
-# falls back to lightly ridge-shrunken partial correlations with a warning.
-.dimsem_level2_network <- function(scores, glasso_args = list()) {
-  .dimsem_require_namespace("qgraph")
-  R <- stats::cor(scores, use = "pairwise.complete.obs")
-  R[!is.finite(R)] <- 0
-  diag(R) <- 1
-  n <- nrow(scores)
-  args <- .dimsem_merge_args(list(gamma = 0.5), glasso_args)
 
-  net <- tryCatch(
-    suppressWarnings(suppressMessages(
-      do.call(qgraph::EBICglasso, c(list(S = R, n = n), args))
-    )),
-    error = function(e) e
-  )
 
-  if (inherits(net, "error")) {
-    warning("Level-2 EBICglasso failed (", conditionMessage(net),
-            "); falling back to ridge-shrunken partial correlations.",
-            call. = FALSE)
-    Rr <- R + diag(0.05, ncol(R))
-    P <- -stats::cov2cor(solve(Rr))
-    diag(P) <- 0
-    net <- P
-  }
 
-  dimnames(net) <- dimnames(R)
-  list(network = net, cor = R)
-}
-
-# --- strategy 1: TGA-style two-level detection ---------------------------------------
-
-.dimsem_hyper_tga <- function(data, network_matrix, partition,
-                              hyper_args = list(), seed = NULL) {
-  part <- partition[!is.na(partition)]
-  comms <- sort(unique(part))
-  d <- length(comms)
-  labels <- paste0("F", comms)
-
-  u_hi <- hyper_args$u_hi %||% 0.90
-  u_lo <- hyper_args$u_lo %||% 0.50
-  reps <- hyper_args$consensus_reps %||% 2000
-  resolution <- hyper_args$resolution %||% 1
-  min_block_size <- hyper_args$min_block_size %||% 3L
-
-  out <- list(method = "tga", d = d, labels = labels, blocks = list(),
-              orphans = character(0), verdict = NA_character_,
-              unidim = NA_real_, block_unidim = NULL, level2 = NULL,
-              consensus_share = NA_real_, notes = character(0))
-
-  if (d < 2) {
-    out$verdict <- "not_applicable"
-    out$notes <- "Fewer than two level-1 dimensions; no hyper level exists."
-    return(out)
-  }
-
-  scores <- .dimsem_network_scores(data, network_matrix, partition)
-  lvl2 <- .dimsem_level2_network(scores, hyper_args$glasso_args %||% list())
-  out$level2 <- lvl2
-  out$unidim <- .dimsem_unidim(lvl2$cor)
-
-  W2 <- abs(lvl2$network)
-  diag(W2) <- 0
-
-  if (all(W2 < .Machine$double.eps)) {
-    out$verdict <- "none"
-    out$notes <- paste0("The level-2 network is empty: community scores show ",
-                        "no conditional dependence (unidim u = ",
-                        round(out$unidim, 3), ").")
-    return(out)
-  }
-
-  g2 <- igraph::graph_from_adjacency_matrix(W2, mode = "undirected",
-                                            weighted = TRUE, diag = FALSE)
-  isolated <- labels[igraph::degree(g2) == 0]
-  cons <- .dimsem_louvain_consensus(
-    g2, reps = reps, resolution = resolution,
-    first_pass = hyper_args$louvain_first_pass %||% FALSE, seed = seed)
-  out$consensus_share <- cons$consensus_share
-
-  membership <- cons$membership
-  membership[isolated] <- NA_integer_
-
-  blocks <- split(names(membership)[!is.na(membership)],
-                  membership[!is.na(membership)])
-  block_sizes <- vapply(blocks, length, integer(1))
-  out$orphans <- c(isolated, unlist(blocks[block_sizes < 2]))
-  blocks <- blocks[block_sizes >= 2]
-
-  # Per-block unidimensionality check; blocks failing clearly are dissolved.
-  keep <- rep(TRUE, length(blocks))
-  bu <- numeric(length(blocks))
-  for (b in seq_along(blocks)) {
-    bu[b] <- .dimsem_unidim(lvl2$cor[blocks[[b]], blocks[[b]], drop = FALSE])
-    if (is.finite(bu[b]) && bu[b] <= u_lo) {
-      keep[b] <- FALSE
-    }
-  }
-  if (any(!keep)) {
-    out$orphans <- c(out$orphans, unlist(blocks[!keep]))
-    out$notes <- c(out$notes, paste0(
-      "Dissolved candidate block(s) with unidim u <= ", u_lo, ": ",
-      paste(vapply(blocks[!keep], paste, character(1), collapse = "+"),
-            collapse = "; "), "."))
-  }
-  out$block_unidim <- stats::setNames(bu[keep], vapply(blocks[keep], paste,
-                                                       character(1), collapse = "+"))
-  blocks <- blocks[keep]
-
-  # Identification gate (see the permutation strategy for the rationale):
-  # hyper-factors need at least `min_block_size` (default 3) level-1
-  # dimensions; smaller validated groupings are reported as correlated
-  # level-1 dimensions rather than hyper-factors.
-  small <- vapply(blocks, length, integer(1)) < min_block_size
-  if (any(small)) {
-    out$notes <- c(out$notes, paste0(
-      "Level-2 grouping(s) below min_block_size = ", min_block_size,
-      " reported as correlated level-1 dimensions, not hyper-factors: ",
-      paste(vapply(blocks[small], paste, character(1), collapse = "+"),
-            collapse = "; "), "."))
-    out$orphans <- c(out$orphans, unlist(blocks[small]))
-    blocks <- blocks[!small]
-  }
-  # NB: paste0("G", integer(0)) returns "G" (length 1) because paste0()
-  # treats zero-length arguments as "" (recycle0 = FALSE); guard the
-  # empty case explicitly.
-  if (length(blocks) > 0) {
-    names(blocks) <- paste0("G", seq_along(blocks))
-  }
-  out$blocks <- blocks
-
-  n_blocks <- length(blocks)
-  if (n_blocks == 0) {
-    out$verdict <- "none"
-  } else if (n_blocks == 1 && length(blocks[[1]]) == d) {
-    # Single community spanning everything: the unidim gate decides whether
-    # a single top-level dimension is statistically supported (Samo et al.,
-    # 2025, Step 7).
-    out$verdict <- if (out$unidim >= u_hi) {
-      "single"
-    } else if (out$unidim <= u_lo) {
-      "none"
-    } else {
-      "inconclusive"
-    }
-    if (identical(out$verdict, "none")) {
-      out$blocks <- list()
-      out$orphans <- labels
-      out$notes <- c(out$notes, paste0(
-        "Louvain merges all dimensions, but unidim (u = ",
-        round(out$unidim, 3), " <= ", u_lo,
-        ") rejects a single top-level dimension."))
-    }
-    if (identical(out$verdict, "inconclusive")) {
-      out$notes <- c(out$notes, paste0(
-        "unidim u = ", round(out$unidim, 3), " lies in the gray zone (",
-        u_lo, ", ", u_hi, "); inspect the level-2 network before imposing ",
-        "a hyper-factor."))
-    }
-  } else {
-    out$verdict <- if (n_blocks == 1) "single" else "multiple"
-  }
-
-  out
-}
-
-# --- strategy 2: permutation-validated higher-order Louvain ---------------------------
+# --- Permutation-validated higher-order Louvain --------------------------------
 
 .dimsem_hyper_permutation <- function(data, partition,
                                       hyper_args = list(), seed = NULL,
@@ -2245,133 +1938,82 @@
                                    hyper_args = list(), seed = NULL,
                                    verbose = TRUE, parallel = FALSE,
                                    ncores = NULL) {
-  method <- hyper_args$method %||% "both"
-  method <- match.arg(method, choices = c("both", "tga", "permutation"))
-
-  results <- list()
-  if (method %in% c("both", "tga")) {
-    if (isTRUE(verbose)) {
-      message("Evaluating hyper-structure: TGA-style level-2 analysis...")
-    }
-    results$tga <- .dimsem_hyper_tga(data, network_matrix, partition,
-                                     hyper_args = hyper_args, seed = seed)
+  if (isTRUE(verbose)) {
+    message("Evaluating hyper-structure: permutation-validated ",
+            "higher-order Louvain...")
   }
-  if (method %in% c("both", "permutation")) {
-    if (isTRUE(verbose)) {
-      message("Evaluating hyper-structure: permutation-validated ",
-              "higher-order Louvain...")
-    }
-    results$permutation <- .dimsem_hyper_permutation(
-      data, partition, hyper_args = hyper_args, seed = seed,
-      parallel = parallel, ncores = ncores, verbose = verbose)
-  }
+  res <- .dimsem_hyper_permutation(
+    data, partition, hyper_args = hyper_args, seed = seed,
+    parallel = parallel, ncores = ncores, verbose = verbose)
 
-  fmt_blocks <- function(res) {
-    if (length(res$blocks) == 0) {
+  fmt_blocks <- function(r) {
+    if (length(r$blocks) == 0) {
       return("-")
     }
-    paste(vapply(seq_along(res$blocks), function(i) {
-      paste0(names(res$blocks)[i], " = {",
-             paste(res$blocks[[i]], collapse = ", "), "}")
+    paste(vapply(seq_along(r$blocks), function(i) {
+      paste0(names(r$blocks)[i], " = {",
+             paste(r$blocks[[i]], collapse = ", "), "}")
     }, character(1)), collapse = "; ")
   }
 
-  verdicts <- vapply(results, function(r) r$verdict, character(1))
-  agree <- length(unique(verdicts)) == 1
-
-  # "inconclusive" is a soft verdict (gray-zone unidim, or diffuse
-  # dependence that fails to localize); when one strategy is decisive and
-  # the other merely inconclusive, follow the decisive one with a caveat.
-  decisive <- verdicts[verdicts != "inconclusive"]
-  effective <- if (agree) {
-    verdicts[[1]]
-  } else if (length(decisive) > 0 && length(unique(decisive)) == 1) {
-    unique(decisive)
-  } else {
-    NA_character_
-  }
-  ref <- if (!is.na(effective) && any(verdicts == effective)) {
-    results[[which(verdicts == effective)[1]]]
-  } else {
-    results[[1]]
-  }
-  caveat <- if (!agree && !is.na(effective)) {
-    inc <- names(verdicts)[verdicts == "inconclusive"]
-    paste0(" (The ", paste(inc, collapse = ", "), " strategy was ",
-           "inconclusive; this recommendation follows the decisive ",
-           "criterion.)")
-  } else {
-    ""
-  }
-
-  recommendation <- if (all(verdicts == "not_applicable")) {
-    "Only one level-1 dimension was proposed; there is no hyper level."
-  } else if (!is.na(effective) && effective == "none") {
-    vp <- results$permutation$validated_pairs
-    if (!is.null(vp) && nrow(vp) > 0) {
-      paste0("No hyper-factor is identified: validated between-dimension ",
-             "dependence exists (",
-             paste(paste0(vp$from, "--", vp$to), collapse = ", "),
-             "), but no grouping reaches the minimum of ",
-             results$permutation$min_block_size %||% 3,
-             " member dimensions. Model these dependencies as correlated ",
-             "level-1 dimensions: a hyper-factor over fewer than three ",
-             "children is an unfalsifiable reparameterization of their ",
-             "correlation(s).", caveat)
-    } else {
-      paste0("Neither imposing a single nor multiple hyper-factors is ",
-             "supported: the level-1 dimensions behave as mutually ",
-             "independent (personality-like) structures.", caveat)
-    }
-  } else if (!is.na(effective) && effective == "single") {
-    paste0("A single hyper-factor over ",
-           fmt_blocks(ref),
-           if (length(ref$orphans) > 0) {
-             paste0(" is supported, with ",
-                    paste(ref$orphans, collapse = ", "),
-                    " left as stand-alone dimension(s).")
-           } else {
-             " is supported (family-resemblance)."
-           }, caveat)
-  } else if (!is.na(effective) && effective == "multiple") {
-    paste0("Multiple hyper-factors are supported: ",
-           fmt_blocks(ref), ".", caveat)
-  } else if (!is.na(effective) && effective == "inconclusive") {
-    paste0("Both strategies are inconclusive; inspect `$hyper` details ",
-           "and consider increasing hyper_args$n_perm or examining the ",
-           "level-2 network directly.")
-  } else {
-    paste0("The two strategies disagree (",
-           paste(names(verdicts), verdicts, sep = ": ", collapse = "; "),
-           "); inspect `$hyper` details -- the permutation test is the ",
-           "stricter inferential criterion, while the TGA result reflects ",
-           "the score-level community structure.")
-  }
+  recommendation <- switch(
+    res$verdict,
+    not_applicable = paste0("Only one level-1 dimension was proposed; ",
+                            "there is no hyper level."),
+    none = {
+      vp <- res$validated_pairs
+      if (!is.null(vp) && nrow(vp) > 0) {
+        paste0("No hyper-factor is identified: validated between-dimension ",
+               "dependence exists (",
+               paste(paste0(vp$from, "--", vp$to), collapse = ", "),
+               "), but no grouping reaches the minimum of ",
+               res$min_block_size %||% 3,
+               " member dimensions. Model these dependencies as correlated ",
+               "level-1 dimensions: a hyper-factor over fewer than three ",
+               "children is an unfalsifiable reparameterization of their ",
+               "correlation(s).")
+      } else {
+        paste0("Neither imposing a single nor multiple hyper-factors is ",
+               "supported: the level-1 dimensions behave as mutually ",
+               "independent (personality-like) structures.")
+      }
+    },
+    single = paste0(
+      "A single hyper-factor over ", fmt_blocks(res),
+      if (length(res$orphans) > 0) {
+        paste0(" is supported, with ", paste(res$orphans, collapse = ", "),
+               " left as stand-alone dimension(s).")
+      } else {
+        " is supported (family-resemblance / ideology-like structure)."
+      }),
+    multiple = paste0("Multiple hyper-factors are supported: ",
+                      fmt_blocks(res), "."),
+    inconclusive = paste0(
+      "The hyper-structure test is inconclusive; inspect `$hyper` details ",
+      "and consider increasing hyper_args$n_perm."),
+    paste0("Hyper-structure verdict: ", res$verdict, ".")
+  )
 
   list(
-    method = method,
-    tga = results$tga,
-    permutation = results$permutation,
-    agreement = agree,
-    effective_verdict = effective,
+    method = "permutation",
+    permutation = res,
+    verdict = res$verdict,
     recommendation = recommendation
   )
 }
 
 
-# --- dimsem_estimate helpers -------------------------------------------------------
+# --- DimSEM_estimate helpers -------------------------------------------------------
 
-# Validate a dimsem_proposal against the supplied data and extract the
+# Validate a DimSEM_proposal against the supplied data and extract the
 # estimation-relevant specification. Hyper blocks are taken with
 # permutation-strategy priority (the stricter inferential criterion),
-# falling back to TGA -- via .dimsem_hyper_plot_result(), which encodes
-# exactly that priority.
+# via .dimsem_hyper_plot_result().
 .dimsem_extract_proposal <- function(proposal, data, covariates = NULL,
                                      include_hyper = TRUE) {
   # Accept both historical spellings of the class attribute.
-  if (!inherits(proposal, "DimSEM_proposal") &&
-      !inherits(proposal, "DimSEM_proposal")) {
-    stop("`proposal` must be a proposal object from DimSEM_proposal().",
+  if (!inherits(proposal, "DimSEM_proposal")) {
+    stop("`proposal` must be a proposal object from DimSEM_propose().",
          call. = FALSE)
   }
   if (!is.data.frame(data) && !is.matrix(data)) {
@@ -2441,7 +2083,7 @@
 .dimsem_assemble_syntax <- function(spec, covariates = NULL,
                                     covariate_targets = "all",
                                     hyper_loadings = "free") {
-  parts <- c("# Measurement model (from dimsem_propose)",
+  parts <- c("# Measurement model (from DimSEM_propose)",
              spec$measurement_syntax)
 
   hyper_names <- names(spec$hyper_blocks)
@@ -2681,7 +2323,7 @@
 # general lavaan-to-Stan compiler (that is blavaan's remit; Merkle &
 # Rosseel, 2018, whose parameterization conventions the measurement part
 # follows -- see the package citation file): this generator covers exactly
-# the models dimsem_propose() emits, which is what makes CPU/GPU-oriented
+# the models DimSEM_propose() emits, which is what makes CPU/GPU-oriented
 # code generation tractable:
 #   * first-order factors from the item partition (free loadings, one
 #     sign-anchored loading per factor; standardized latent disturbances),
@@ -3599,27 +3241,26 @@ if (has_cov && has_hyper)
 #' mean/median/sd, a central credible interval, and convergence
 #' diagnostics (rhat, ess_bulk, ess_tail).
 #'
-#' @param object A `"DimSem_estimate"` object fitted with `engine = "bayes"`.
+#' @param object A `"DimSEM_estimate"` object fitted with `engine = "bayes"`.
 #' @param pars `"core"` (default: loadings, structural, hyper) or `"all"`
 #'   (adds item intercepts and residual SDs).
 #' @param prob Central credible-interval mass (default .95).
 #' @return A `"DimSEM_posterior"` list of tidy data frames, one per block.
 #' @export
-# Extract core posterior summary statistics from a DimSem_estimate object,
+# Extract core posterior summary statistics from a DimSEM_estimate object,
 # relabeled into SEM terms. Returns a list of tidy data frames by block
 # (loadings, intercepts, residual_sd, structural, hyper, correlations),
 # each carrying posterior mean/median/sd, a central credible interval, and
 # convergence diagnostics (rhat, ess_bulk, ess_tail).
 #
-#   object : a "DimSem_estimate" object fitted with engine = "bayes".
+#   object : a "DimSEM_estimate" object fitted with engine = "bayes".
 #   pars   : which blocks to return; "core" (default) = loadings,
 #            structural, hyper, correlations; "all" adds intercepts and
 #            residual SDs; or a character vector of block names.
 #   prob   : central credible-interval mass (default .95).
 DimSEM_posterior <- function(object, pars = c("core", "all"), prob = 0.95) {
-  if (!inherits(object, "DimSem_estimate") &&
-      !inherits(object, "DimSEM_estimate")) {
-    stop("`object` must be a DimSem_estimate object.", call. = FALSE)
+  if (!inherits(object, "DimSEM_estimate")) {
+    stop("`object` must be a DimSEM_estimate object.", call. = FALSE)
   }
   if (!identical(object$engine, "bayes")) {
     stop("Posterior summaries are only available for engine = \"bayes\"; ",
@@ -3797,14 +3438,13 @@ print.DimSEM_posterior <- function(x, ...) {
 #' standardized disturbances) show `se = 0` and `NA` diagnostics,
 #' mirroring lavaan's display of fixed parameters.
 #'
-#' @param object A `"DimSem_estimate"` object fitted with `engine = "bayes"`.
+#' @param object A `"DimSEM_estimate"` object fitted with `engine = "bayes"`.
 #' @param prob Central credible-interval mass (default .95).
 #' @return A data frame in lavaan `parameterEstimates()` layout.
 #' @export
 DimSEM_parameterEstimates <- function(object, prob = 0.95) {
-  if (!inherits(object, "DimSem_estimate") &&
-      !inherits(object, "DimSEM_estimate")) {
-    stop("`object` must be a DimSem_estimate object.", call. = FALSE)
+  if (!inherits(object, "DimSEM_estimate")) {
+    stop("`object` must be a DimSEM_estimate object.", call. = FALSE)
   }
   if (!identical(object$engine, "bayes")) {
     stop("Use lavaan::parameterEstimates(object$fit) for ML fits; this ",

@@ -7,7 +7,7 @@
 DimSEM_parameterEstimates(object, prob = 0.95)
 }
 \arguments{
-\item{object}{A \code{"DimSem_estimate"} object fitted with \code{engine = "bayes"}.}
+\item{object}{A \code{"DimSEM_estimate"} object fitted with \code{engine = "bayes"}.}
 
 \item{prob}{Central credible-interval mass (default .95).}
 }

@@ -39,7 +39,11 @@ the proposal.}
 regressions. \code{"all"} (default) regresses every first-order dimension
 and every hyper-factor on all covariates simultaneously. Alternatively,
 a named list mapping latent names to character vectors of covariates, e.g.
-\code{list(G1 = c("age", "educ"), F2 = "age")}.}
+\code{list(G1 = c("age", "educ"), F2 = "age")}. When a hyper-factor and all
+of its child dimensions are targeted at once (as under \code{"all"}), the
+Bayesian engine with \code{hyper_loadings = "unity"} identifies the
+decomposition through an exact sum-to-zero constraint on the child
+coefficients within each such block; see Details.}
 
 \item{model_syntax}{Optional complete lavaan-style model syntax. When
 supplied, it overides the syntax generated from the proposal entirely
@@ -148,4 +152,45 @@ deletion), supports within-chain parallelism through \code{reduce_sum}
 support for GPU acceleration (\code{opencl_ids}). Portions of the model
 structure follow conventions established in blavaan (Merkle & Rosseel,
 2018); see the package citation file.
+
+\strong{Identification of simultaneous covariate effects.} When a
+covariate is regressed on a hyper-factor and on all of its child
+dimensions at once, the child-level mean structure informs only the
+total effects (child coefficient plus loading-weighted hyper path);
+shifting a constant out of every child coefficient and into the
+hyper-level coefficient is exactly likelihood-invariant, so the
+decomposition is a flat ridge that only the priors would resolve --
+with prior-dependent estimands and severely degraded MCMC mixing as
+the practical symptoms. Under \code{hyper_loadings = "unity"} the Bayesian
+engine therefore imposes an exact sum-to-zero constraint on the child
+coefficients within every fully targeted hyper-block (implemented
+through a marginal-variance-preserving orthonormal contrast basis).
+The hyper-level coefficient is then identified as the unweighted mean
+of the children's total covariate effects -- extending the unweighted
+family-resemblance convention of the unity loading structure to the
+structural layer -- and each child coefficient as that dimension's
+deviation from the mean. Child coefficients within a constrained block
+are consequently contrasts: they sum to zero by construction, and a
+negative value indicates a below-average, not necessarily an opposing,
+covariate effect. Under \code{hyper_loadings = "free"} no analogous fixed
+constraint exists (the symmetry-consistent version is loading-weighted
+and parameter-dependent); the engine instead emits a warning that the
+hyper/child split remains identified only through the priors. Under
+the ML engine the same redundancy manifests as inflated standard
+errors, as documented. With covariates present, the reported
+within-block correlation \code{rho_g} is conditional on the covariates, not
+the marginal correlation. Within constrained blocks the reported
+decomposition is additionally made orbit-invariant: when the residual
+shared variance is negligible, per-factor reflections become
+near-symmetries of the posterior, so the sign relabeling re-derives
+the reported coefficients per draw from sign-corrected total effects
+(reducing exactly to the ordinary correction whenever a block's signs
+are uniform). If the posterior median of \code{rho_g} for a
+covariate-targeted block falls below \code{bayes_args$rho_floor} (default
+0.05), a diagnostic warning notes that the hyper level is empirically
+vacuous conditional on the covariates -- typically because a covariate
+absorbs the block's common variance -- and recommends interpreting the
+total effects. The shipped \code{toy_simple_cov} dataset provides a
+latent-level covariate with known ground truth for this decomposition
+(see \code{attr(toy_simple_cov, "truth")}).
 }

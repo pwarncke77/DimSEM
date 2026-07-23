@@ -15,6 +15,11 @@
 #   toy_random  : n = 400, 24 five-point Likert items, no factor structure
 #                 (independent items).
 #
+#   toy_simple_cov : n = 400, toy_simple's 3-factor/12-item structure plus a
+#                 latent-level external covariate "cov" with known ground
+#                 truth for the sum-to-zero covariate decomposition
+#                 (see section 4; truth in attr(toy_simple_cov, "truth")).
+#
 # Run this script from the package root. It writes .rda files into data/.
 # The script itself lives in data-raw/ and is excluded from the build
 # (add ^data-raw$ to .Rbuildignore).
@@ -108,10 +113,67 @@ toy_random <- as.data.frame(
 )
 names(toy_random) <- letters[1:24]
 
-# --- write to data/ ------------------------------------------------------------
+# --- 4) toy_simple_cov: toy_simple's structure plus a latent-level covariate --
+#
+# Validation target for simultaneous covariate estimation under unity
+# hyper-loadings with the sum-to-zero identification. The covariate is
+# generated at the LATENT level (never from items), so the measurement
+# model is correctly specified: items are conditionally independent given
+# (eta, cov), and the residual (conditional-on-cov) factor correlation is
+# exactly compound-symmetric -- the healthy-tau regime in which the
+# sign-relabeling block premise holds.
+#
+# Generating model, in the estimator's own metric (disturbance var = 1):
+#   cov     ~ N(0, 1)
+#   g_resid ~ N(0, tau2),      tau2 = 0.43  =>  rho_g = tau2/(tau2+1) = 0.30
+#   eta_k   = t_k * cov + g_resid + z_k,   z_k ~ N(0, 1) iid
+# with total covariate effects t = (0.60, 0.30, 0.45). Under the
+# sum-to-zero convention the true decomposition is therefore
+#   alpha = mean(t) = 0.45,   beta = t - alpha = (0.15, -0.15, 0.00).
+# Items are built from the standardized eta with the same loading pattern
+# as toy_simple and discretized to 5-point Likert. Ground truth is exact
+# at the latent level; Likert coarsening mildly attenuates estimates
+# under the normal likelihood, so validation should target coverage and
+# ordering of the recovered decomposition, not equality.
+#
+# The truth is attached as attr(toy_simple_cov, "truth"). Note that
+# DimSEM_propose() should be run on the item columns only, e.g.
+# DimSEM_propose(toy_simple_cov[, letters[1:12]]).
+
+set.seed(456)
+
+n_cov      <- 400
+t_totals   <- c(0.60, 0.30, 0.45)
+tau2_cov   <- 0.43
+cov_scores <- stats::rnorm(n_cov)
+g_resid    <- stats::rnorm(n_cov, sd = sqrt(tau2_cov))
+eta_cov    <- sapply(1:3, function(k) {
+  t_totals[k] * cov_scores + g_resid + stats::rnorm(n_cov)
+})
+
+loadings_cov <- rep(c(0.80, 0.75, 0.70, 0.65), 3)
+assign_cov   <- rep(1:3, each = 4)
+X_cov <- sapply(seq_len(12), function(j) {
+  lam <- loadings_cov[j]
+  eta_std <- as.numeric(scale(eta_cov[, assign_cov[j]]))
+  lam * eta_std + sqrt(1 - lam^2) * stats::rnorm(n_cov)
+})
+
+toy_simple_cov <- as.data.frame(apply(X_cov, 2, to_likert5))
+names(toy_simple_cov) <- letters[1:12]
+toy_simple_cov$cov <- cov_scores
+attr(toy_simple_cov, "truth") <- list(
+  totals = t_totals,
+  alpha  = mean(t_totals),
+  beta   = t_totals - mean(t_totals),
+  tau2   = tau2_cov,
+  rho_g  = tau2_cov / (tau2_cov + 1)
+)
 
 # Equivalent to usethis::use_data(..., overwrite = TRUE):
 save(toy_simple,  file = "data/toy_simple.rda",  compress = "bzip2", version = 2)
 save(toy_complex, file = "data/toy_complex.rda", compress = "bzip2", version = 2)
 save(toy_random,  file = "data/toy_random.rda",  compress = "bzip2", version = 2)
+save(toy_simple_cov, file = "data/toy_simple_cov.rda",
+     compress = "bzip2", version = 2)
 

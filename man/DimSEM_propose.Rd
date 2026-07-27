@@ -51,15 +51,22 @@ analyzed items (i.e., \code{length(items)} when \code{items} is used, otherwise
 of the form \code{item_1}, \code{item_2}, ...}
 
 \item{ega_args}{Optional named list of arguments passed to \code{\link[EGAnet:EGA]{EGAnet::EGA()}}.
-Defaults are merged with \code{list(corr = "auto", model = "glasso", algorithm = "louvain", consensus.method = "lowest_tefi", uni.method = "LE", plot.EGA = FALSE)}. By default, DimSEM additionally
+Defaults are merged with \code{list(corr = "auto", model = "glasso", algorithm = "louvain", consensus.method = "lowest_tefi", uni.method = "louvain", plot.EGA = FALSE)}; apart from the Louvain
+algorithm and the TEFI consensus rule, these match \code{\link[EGAnet:EGA]{EGAnet::EGA()}}'s
+own defaults, so an unproblematic solution is identical to a plain
+\code{EGAnet::EGA()} call. By default, DimSEM additionally
 enforces a minimum community size of three items via Louvain
-resolution annealing: whenever the EGA solution contains a community
+resolution annealing: the first solution is estimated at EGAnet's
+default resolution, and whenever it contains a community
 of fewer than \code{min_community_size} (default 3) items that is connected
 to the rest of the network, the Louvain \code{resolution} parameter is
 lowered from \code{resolution_start} (default 1.2) in decrements of
-\code{resolution_step} (default 0.01), coarsening the partition, until all
+\code{resolution_step} (default 0.01) -- the first rung of the ladder being
+\code{resolution_start - resolution_step} -- coarsening the partition,
+until all
 communities reach the minimum size or \code{resolution_min} (default 0.05)
-is hit. Sub-threshold communities that form their own disconnected
+is hit. Data that satisfy the rule outright are therefore never
+re-estimated at a non-default resolution. Sub-threshold communities that form their own disconnected
 network component (isolated items or isolated doublets) can never be
 merged by coarsening and are instead converted to unassigned orphans
 (NA), as are any communities still below the threshold at the

@@ -150,7 +150,7 @@
     model = "glasso",
     algorithm = "louvain",
     consensus.method = "lowest_tefi",
-    uni.method = "LE",
+    uni.method = "louvain",
     plot.EGA = FALSE
   )
   args <- .dimsem_merge_args(defaults, ega_args)
@@ -202,7 +202,15 @@
     )
   }
 
-  resolution <- if (louvain) fixed_res %||% res_start else NULL
+  # The FIRST evaluation uses EGAnet's own default resolution (no
+  # `resolution` argument is passed), so an unproblematic solution is
+  # reported exactly as a plain EGAnet::EGA() call would report it; the
+  # annealing ladder is entered only when the minimum-size rule is
+  # violated, and then starts one step below `resolution_start`. Passing
+  # `resolution_start` itself as the first evaluation would silently
+  # change the reported solution for data that never needed annealing
+  # (a higher resolution yields finer, more numerous communities).
+  resolution <- if (louvain) fixed_res else NULL
   n_steps <- 0L
   # Best-solution tracking: annealing does not improve monotonically --
   # near the resolution floor Louvain can collapse the entire network into
@@ -250,13 +258,19 @@
     }
 
     single_community <- length(sizes) <= 1
+    # Next rung: the ladder is entered at `resolution_start - res_step`
+    # (the first evaluation ran at EGAnet's default resolution).
+    next_resolution <- if (is.null(resolution)) {
+      res_start - res_step
+    } else {
+      resolution - res_step
+    }
     can_step <- search_enabled && fixable && !single_community &&
-      n_small_items > 0L &&
-      !is.null(resolution) && (resolution - res_step) >= res_min
+      n_small_items > 0L && next_resolution >= res_min
     if (!can_step) {
       break
     }
-    resolution <- resolution - res_step
+    resolution <- next_resolution
     n_steps <- n_steps + 1L
   }
 
@@ -269,9 +283,11 @@
 
   if (isTRUE(verbose) && n_steps > 0L) {
     message("EGA resolution search: explored ", n_steps + 1L,
-            " resolution(s) from ", format(round(res_start, 3)),
-            " downward; accepted resolution ",
-            format(round(accepted_resolution, 3)),
+            " resolution(s) (EGAnet default, then ",
+            format(round(res_start - res_step, 3)),
+            " downward); accepted resolution ",
+            if (is.null(accepted_resolution)) "EGAnet default" else
+              format(round(accepted_resolution, 3)),
             " (fewest items in communities below min_community_size = ",
             min_size, ").")
   }
@@ -330,7 +346,7 @@
     partition_table = .dimsem_partition_table(colnames(data), wc),
     n_dim = n_dim,
     network = network,
-    resolution = accepted_resolution,
+    resolution = accepted_resolution %||% NA_real_,
     resolution_steps = n_steps,
     community_sizes = table(wc[!is.na(wc)]),
     orphaned_small = rule_na
@@ -3100,6 +3116,8 @@ if (has_cov && has_hyper && !free_hyper)
                 "residual dependence. Consider interpreting the total ",
                 "effects (child + hyper coefficients) and whether the ",
                 "covariate absorbs the block's common variance. ",
+                "Mirror-mode splitting in *_un scaffolding is expected ",
+                "in this regime; interpret only corrected quantities.",
                 call. = FALSE)
       }
     }

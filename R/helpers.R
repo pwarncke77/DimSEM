@@ -1210,7 +1210,12 @@
             alpha = hyper_alpha,
             show.legend = FALSE,
             inherit.aes = FALSE
-          )
+          ) +
+          # Declared here, not in the final labs() call: the `fill`
+          # aesthetic exists only when this layer is drawn, and labelling
+          # an absent aesthetic triggers an "Ignoring unknown labels"
+          # message whenever no hyper-structure was found.
+          ggplot2::labs(fill = "Hyper-dimension")
       } else {
         warning(
           "Package `ggforce` is required for hypergraph-style background ",
@@ -1247,10 +1252,7 @@
       repel = TRUE,
       size = label_size
     ) +
-    ggplot2::labs(
-      color = "Dimension",
-      fill = "Hyper-dimension"
-    ) +
+    ggplot2::labs(color = "Dimension") +
     ggplot2::theme_void()
 }
 
@@ -3098,8 +3100,6 @@ if (has_cov && has_hyper && !free_hyper)
                 "residual dependence. Consider interpreting the total ",
                 "effects (child + hyper coefficients) and whether the ",
                 "covariate absorbs the block's common variance. ",
-                "Mirror-mode splitting in *_un scaffolding is expected ",
-                "in this regime; interpret only corrected quantities.",
                 call. = FALSE)
       }
     }

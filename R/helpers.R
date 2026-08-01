@@ -2370,8 +2370,8 @@
     sigma = "student_t(3, 0, 2)",
     tau_g = "student_t(3, 0, 2)",
     delta = "normal(0, 2)",
-    beta = "std_normal()",
-    beta_binary = "normal(0, 2)",
+    beta = "normal(0, 0.5)",
+    beta_binary = "normal(0, 1)",
     cut = "normal(0, 4)"
   ), priors)
 
@@ -2547,9 +2547,11 @@
       "  delta_un ~ ", pr$delta, ";
 ") else "",
     if (has_cov) paste0(
-      "  // Standard-normal priors for standardized covariates; a wider
-  // normal(0, 2) for raw binary predictors (one raw unit ~ two
-  // predictor SDs for a balanced binary variable). Priors act on the
+      "  // Weakly regularizing normal(0, 0.5) priors for standardized
+  // covariates (the manuscript's regression-coefficient prior);
+  // doubled to normal(0, 1) for raw binary predictors, since one raw
+  // unit is about two predictor SDs for a balanced binary variable,
+  // which preserves the same per-SD regularization. Priors act on the
   // FREE coordinates: identity coordinates keep the usual per-slope
   // semantics; sum-to-zero contrast coordinates use a marginal-
   // variance-preserving basis, so each implied child slope retains
@@ -2610,6 +2612,7 @@ if (free_hyper)
 " else "",
 if (has_cov && has_hyper)
 "  matrix[Q, G] beta_g_cor;
+  matrix[Q, K] beta_total;                // likelihood-identified totals
 " else "",
 if (has_hyper && !free_hyper)
 "  vector[G] rho_g;
@@ -2650,17 +2653,26 @@ if (has_cov && has_hyper)
   }
 " else "",
 if (has_cov && has_hyper && !free_hyper)
-"  // Orbit-invariant decomposition within sum-to-zero-constrained
-  // blocks. The per-factor correction above presumes uniform block
-  // signs (per-factor reflection is not a likelihood symmetry when
-  // tau_g is healthy), but as tau_g -> 0 the block dissolves and all
-  // per-factor sign patterns become near-equal posterior modes. The
-  // equivariant quantities are the totals T_k = beta_f + beta_g (each
-  // flips with its own factor), so the reported decomposition is
-  // re-derived per draw from sign-corrected totals: alpha as their
-  // mean, betas as the deviations. Under uniform signs this reduces
-  // exactly to the correction above (the constraint makes
-  // mean(T) = beta_g), so it is a strict generalization.
+"  // Orbit-invariant decomposition of the covariate effects.
+  //
+  // Under unity loadings the only EXACT sign symmetry is the joint flip
+  // of a whole block (all children plus G), under which alpha and every
+  // beta negate together -- exactly what the per-factor correction above
+  // implements. As tau_g -> 0, however, the block dissolves and a LONE
+  // child flip becomes a near-symmetry too; its group action is
+  // different: G keeps its orientation, so alpha is INVARIANT while
+  // beta_k -> -beta_k - 2*alpha (the total T_k = beta_k + alpha is what
+  // flips with the factor). Composing the two, a general observed sign
+  // pattern is undone by
+  //     beta_g_cor  = sign_g * beta_g
+  //     beta_f_cor  = sign_f[k] * (beta_f[k] + beta_g) - sign_g * beta_g,
+  // which reduces to sign_f[k] * beta_f[k] whenever the block's signs
+  // are uniform. Note this leaves alpha's own (prior-anchored) posterior
+  // untouched, so it does not manufacture sharpness that the data do not
+  // support -- essential under covariate_identification = \"prior\".
+  // Under the sum-to-zero constraint the reported betas must in addition
+  // sum to zero, which pins alpha to the mean of the sign-corrected
+  // totals; that branch is applied first.
   for (g in 1:G) {
     if (ctr_g[g] == 1) {
       for (q in 1:Q) {
@@ -2680,9 +2692,35 @@ if (has_cov && has_hyper && !free_hyper)
           }
         }
       }
+    } else if (reg_g[g] == 1) {
+      for (q in 1:Q) {
+        for (k in 1:K) {
+          if (factor_hyper[k] == g && reg_f[k] == 1) {
+            beta_f_cor[q, k] = sign_f[k] * (beta_f[q, k] + beta_g[q, g])
+                               - sign_g[g] * beta_g[q, g];
+          }
+        }
+      }
     }
   }
 " else "",
+if (has_cov && has_hyper) paste0(
+"  // Total covariate effect on each child dimension: the quantity the
+  // LIKELIHOOD identifies, invariant to how the alpha/beta split is
+  // conventionalized (sum-to-zero or prior-anchored) and to the sign
+  // orbit. Report these for claims the data alone support.
+  for (q in 1:Q) {
+    for (k in 1:K) {
+      if (factor_hyper[k] == 0 || reg_f[k] == 0) {
+        beta_total[q, k] = beta_f_cor[q, k];
+      } else {
+        beta_total[q, k] = beta_f_cor[q, k]
+                           + ", if (free_hyper) "delta[k]" else "1", " * beta_g_cor[q, factor_hyper[k]];
+      }
+    }
+  }
+") else "",
+
 "}
 ")
 
@@ -2696,6 +2734,7 @@ if (has_cov && has_hyper && !free_hyper)
                               covariate_targets = "all",
                               likelihood = "normal", grainsize = NULL,
                               hyper_loadings = "free",
+                              covariate_identification = "sum_to_zero",
                               covariate_info = NULL,
                               sign_ref = NULL) {
   items <- names(spec$partition)[!is.na(spec$partition)]
@@ -2786,7 +2825,9 @@ if (has_cov && has_hyper && !free_hyper)
     bb <- .dimsem_beta_basis(reg_f,
                              factor_hyper = sd$factor_hyper,
                              reg_g = sd$reg_g,
-                             hyper_loadings = hyper_loadings)
+                             hyper_loadings = hyper_loadings,
+                             covariate_identification =
+                               covariate_identification)
     sd$K_free <- bb$K_free
     sd$beta_basis <- bb$basis
     if (length(hyper_names) > 0) {
@@ -2797,6 +2838,7 @@ if (has_cov && has_hyper && !free_hyper)
       sd$ctr_g <- as.integer(seq_along(hyper_names) %in% bb$constrained)
     }
     attr(sd, "identification") <- list(
+      strategy = covariate_identification,
       eligible = bb$eligible, constrained = bb$constrained,
       hyper_names = hyper_names)
   }
@@ -2853,6 +2895,27 @@ if (has_cov && has_hyper && !free_hyper)
 # is small). The engine therefore leaves the free-loadings decomposition
 # soft-identified and warns (see .dimsem_estimate_bayes()).
 #
+# `covariate_identification` selects the strategy explicitly:
+#   * "sum_to_zero" (default) -- the hard constraint described above,
+#     applied wherever it is exact (unity loadings, fully targeted block).
+#   * "prior" -- no constraint; the decomposition is anchored by the
+#     coefficient priors alone (SOFT identification). This reproduces the
+#     conventional blavaan-style parameterization: with priors N(0, s_a)
+#     on the hyper coefficient and N(0, s_b) on the child coefficients,
+#     the ridge settles at the penalized projection
+#       alpha* = sum_k delta_k t_k / (s_b^2 / s_a^2 + sum_k delta_k^2),
+#     i.e. the (loading-weighted) mean of the children's total effects
+#     shrunk by sum(delta^2) / (s_b^2/s_a^2 + sum(delta^2)). The child
+#     coefficients then do NOT sum to zero: a common residue of the shared
+#     effect stays distributed across them. Two consequences to document
+#     rather than hide: the estimand depends on the prior scale RATIO, and
+#     the shrinkage factor drifts toward 1 as the number of detected
+#     facets grows -- so "the generalized effect" is not comparable across
+#     item pools of different size. "sum_to_zero" is the limiting case of
+#     "prior" as s_a/s_b -> Inf (or as the facet count grows), which is why
+#     the two are reported on the same scale and why the constraint is the
+#     default.
+#
 # Implementation. The constraint is hard-coded into a data-supplied basis
 # matrix B (K_free x K) mapping free coordinates to the full slope matrix,
 # beta_f = beta_free %*% B:
@@ -2873,7 +2936,8 @@ if (has_cov && has_hyper && !free_hyper)
 # exclusion restriction already identifies alpha and no constraint is
 # needed). Eligible blocks are CONSTRAINED only under unity loadings.
 .dimsem_beta_basis <- function(reg_f, factor_hyper = NULL, reg_g = NULL,
-                               hyper_loadings = "free") {
+                               hyper_loadings = "free",
+                               covariate_identification = "sum_to_zero") {
   K <- length(reg_f)
   fh <- factor_hyper %||% integer(K)
   eligible <- integer(0)
@@ -2884,8 +2948,12 @@ if (has_cov && has_hyper && !free_hyper)
       eligible <- c(eligible, g)
     }
   }
-  constrained <- if (identical(hyper_loadings, "unity")) eligible
-                 else integer(0)
+  constrained <- if (identical(hyper_loadings, "unity") &&
+                     identical(covariate_identification, "sum_to_zero")) {
+    eligible
+  } else {
+    integer(0)
+  }
 
   rows <- list()
   handled <- rep(FALSE, K)
@@ -2929,6 +2997,7 @@ if (has_cov && has_hyper && !free_hyper)
                                    covariate_targets = "all",
                                    covariate_info = NULL,
                                    hyper_loadings = "free",
+                                   covariate_identification = "sum_to_zero",
                                    bayes_args = list(),
                                    force_recompile = FALSE, seed = NULL,
                                    verbose = TRUE) {
@@ -2973,7 +3042,9 @@ if (has_cov && has_hyper && !free_hyper)
       spec, data, covariates = covariates,
       covariate_targets = covariate_targets,
       likelihood = likelihood, grainsize = bayes_args$grainsize,
-      hyper_loadings = hyper_loadings, covariate_info = covariate_info,
+      hyper_loadings = hyper_loadings,
+      covariate_identification = covariate_identification,
+      covariate_info = covariate_info,
       sign_ref = bayes_args$sign_ref
     )
     stan_data <- .dimsem_stan_data_gpu(stan_data, likelihood = likelihood)
@@ -2989,17 +3060,21 @@ if (has_cov && has_hyper && !free_hyper)
       spec, data, covariates = covariates,
       covariate_targets = covariate_targets,
       likelihood = likelihood, grainsize = bayes_args$grainsize,
-      hyper_loadings = hyper_loadings, covariate_info = covariate_info,
+      hyper_loadings = hyper_loadings,
+      covariate_identification = covariate_identification,
+      covariate_info = covariate_info,
       sign_ref = bayes_args$sign_ref
     )
   }
   # Covariate identification bookkeeping (see .dimsem_beta_basis()).
   # `constrained` blocks carry the exact sum-to-zero identification;
-  # `eligible` blocks under free loadings would need it but are left
-  # soft-identified by the priors, which warrants an explicit warning.
+  # `eligible` blocks left unconstrained -- because the user chose
+  # covariate_identification = "prior", or because free loadings admit no
+  # exact fixed constraint -- are soft-identified by the priors alone and
+  # are flagged, with the message keyed to WHY they were left soft.
   id_info <- attr(stan_data, "identification") %||%
-    list(eligible = integer(0), constrained = integer(0),
-         hyper_names = character(0))
+    list(strategy = covariate_identification, eligible = integer(0),
+         constrained = integer(0), hyper_names = character(0))
   if (length(id_info$constrained) > 0 && isTRUE(verbose)) {
     message("Covariate identification: exact sum-to-zero constraint on ",
             "child-dimension coefficients within hyper-block(s) ",
@@ -3012,18 +3087,35 @@ if (has_cov && has_hyper && !free_hyper)
   }
   soft <- setdiff(id_info$eligible, id_info$constrained)
   if (length(soft) > 0) {
-    warning("With hyper_loadings = \"free\", covariates target hyper-",
-            "block(s) ", paste(id_info$hyper_names[soft], collapse = ", "),
-            " and ALL of their children simultaneously. The likelihood ",
-            "then informs only the delta-weighted total effects; the ",
-            "split between the hyper-level coefficient and the child ",
-            "coefficients is identified only softly by the priors. ",
-            "Interpret the individual coefficients cautiously, or use ",
-            "hyper_loadings = \"unity\", where an exact sum-to-zero ",
-            "identification applies.", call. = FALSE)
+    blocks <- paste(id_info$hyper_names[soft], collapse = ", ")
+    if (identical(covariate_identification, "prior")) {
+      if (isTRUE(verbose)) {
+        message("Covariate identification: prior-anchored (soft) for ",
+                "hyper-block(s) ", blocks, ". The likelihood informs only ",
+                "the total effects (child + hyper coefficient); their ",
+                "split is set by the coefficient priors, so the ",
+                "hyper-level coefficient is a shrunken mean of the ",
+                "children's total effects and the child coefficients do ",
+                "not sum to zero. The split depends on the prior scale ",
+                "ratio and on the number of detected facets -- report a ",
+                "prior sensitivity check, and prefer the total effects ",
+                "for claims the data alone support.")
+      }
+    } else {
+      warning("With hyper_loadings = \"free\", covariates target hyper-",
+              "block(s) ", blocks,
+              " and ALL of their children simultaneously. The likelihood ",
+              "then informs only the delta-weighted total effects; the ",
+              "split between the hyper-level coefficient and the child ",
+              "coefficients is identified only softly by the priors. ",
+              "Interpret the individual coefficients cautiously, or use ",
+              "hyper_loadings = \"unity\", where an exact sum-to-zero ",
+              "identification applies.", call. = FALSE)
+    }
   }
   stan <- list(model_code = stan_code, data = stan_data,
                likelihood = likelihood, hyper_loadings = hyper_loadings,
+               covariate_identification = covariate_identification,
                variant = if (gpu) "gpu_vectorized" else "cpu_reduce_sum",
                identification = id_info)
 
@@ -3128,7 +3220,7 @@ if (has_cov && has_hyper && !free_hyper)
          as.data.frame(fit$summary(variables = c(
            if (!is.null(covariates)) "beta_f_cor",
            if (!is.null(covariates) && length(spec$hyper_blocks) > 0)
-             "beta_g_cor"))),
+             c("beta_g_cor", "beta_total")))),
          error = function(e) NULL),
        fit_measures = NULL, stan = stan,
        param_map = .dimsem_stan_param_map(spec, covariates, hyper_loadings),
@@ -3167,8 +3259,8 @@ if (has_cov && has_hyper && !free_hyper)
     sigma = "student_t(3, 0, 2)",
     tau_g = "student_t(3, 0, 2)",
     delta = "normal(0, 2)",
-    beta = "std_normal()",
-    beta_binary = "normal(0, 2)",
+    beta = "normal(0, 0.5)",
+    beta_binary = "normal(0, 1)",
     cut = "normal(0, 4)"
   ), priors)
 
@@ -3336,7 +3428,8 @@ if (free_hyper) paste0("  delta_un ~ ", pr$delta, ";
 ") else "",
 if (has_cov) paste0(
 "  // Priors act on the free coordinates; the contrast basis is
-  // marginal-variance-preserving (see the CPU generator's note).
+  // marginal-variance-preserving, and the scales match the CPU
+  // generator (normal(0, 0.5); doubled for raw binary predictors).
   for (q in 1:Q) {
     if (x_binary[q] == 1) {
       beta_free[q] ~ ", pr$beta_binary, ";
@@ -3386,6 +3479,7 @@ if (free_hyper)
 " else "",
 if (has_cov && has_hyper)
 "  matrix[Q, G] beta_g_cor;
+  matrix[Q, K] beta_total;                // likelihood-identified totals
 " else "",
 if (has_hyper && !free_hyper)
 "  vector[G] rho_g;
@@ -3426,11 +3520,11 @@ if (has_cov && has_hyper)
   }
 " else "",
 if (has_cov && has_hyper && !free_hyper)
-"  // Orbit-invariant decomposition within sum-to-zero-constrained
-  // blocks (see the CPU generator's note): re-derive alpha/beta per
-  // draw from sign-corrected totals, robust to the tau_g -> 0 regime
-  // where per-factor reflections become near-symmetries; reduces
-  // exactly to the per-factor correction under uniform block signs.
+"  // Orbit-invariant decomposition of the covariate effects (see the CPU
+  // generator's note): constrained blocks re-derive alpha as the mean of
+  // the sign-corrected totals; unconstrained but G-targeted blocks undo a
+  // general sign pattern via beta_f_cor = sign_f[k] * (beta_f[k] +
+  // beta_g) - sign_g * beta_g, leaving alpha's own posterior untouched.
   for (g in 1:G) {
     if (ctr_g[g] == 1) {
       for (q in 1:Q) {
@@ -3450,9 +3544,35 @@ if (has_cov && has_hyper && !free_hyper)
           }
         }
       }
+    } else if (reg_g[g] == 1) {
+      for (q in 1:Q) {
+        for (k in 1:K) {
+          if (factor_hyper[k] == g && reg_f[k] == 1) {
+            beta_f_cor[q, k] = sign_f[k] * (beta_f[q, k] + beta_g[q, g])
+                               - sign_g[g] * beta_g[q, g];
+          }
+        }
+      }
     }
   }
 " else "",
+if (has_cov && has_hyper) paste0(
+"  // Total covariate effect on each child dimension: the quantity the
+  // LIKELIHOOD identifies, invariant to how the alpha/beta split is
+  // conventionalized (sum-to-zero or prior-anchored) and to the sign
+  // orbit. Report these for claims the data alone support.
+  for (q in 1:Q) {
+    for (k in 1:K) {
+      if (factor_hyper[k] == 0 || reg_f[k] == 0) {
+        beta_total[q, k] = beta_f_cor[q, k];
+      } else {
+        beta_total[q, k] = beta_f_cor[q, k]
+                           + ", if (free_hyper) "delta[k]" else "1", " * beta_g_cor[q, factor_hyper[k]];
+      }
+    }
+  }
+") else "",
+
 "}
 ")
 
@@ -3655,6 +3775,15 @@ DimSEM_posterior <- function(object, pars = c("core", "all"), prob = 0.95) {
                              stringsAsFactors = FALSE)
         out$structural_hyper <- relabel(
           bg, paste0(gridg$hyper, " ~ ", gridg$covariate))
+      }
+      # Total effects: what the likelihood identifies, invariant to the
+      # alpha/beta identification convention.
+      bt <- summ("beta_total")
+      if (!is.null(bt)) {
+        gridt <- expand.grid(covariate = map$covariates, factor = map$factors,
+                             stringsAsFactors = FALSE)
+        out$structural_total <- relabel(
+          bt, paste0(gridt$factor, " ~ ", gridt$covariate, " (total)"))
       }
     }
   }
@@ -3876,6 +4005,26 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95) {
               add(names(blocks)[gi], "~", map$covariates[q],
                   summarize_var(bg[, , idx, drop = FALSE]))
             }
+          }
+        }
+      }
+    }
+  }
+  # Total covariate effects as defined parameters: identified by the
+  # likelihood regardless of how the hyper/child split is conventionalized,
+  # and therefore the quantities to prefer for substantive claims (they are
+  # also the only ones that remain interpretable when the hyper level is
+  # empirically vacuous -- see the rho_g diagnostic).
+  if (length(map$covariates) > 0 && length(blocks) > 0) {
+    bt <- grab("beta_total")
+    if (!is.null(bt)) {
+      for (ki in seq_along(map$factors)) {
+        for (q in seq_along(map$covariates)) {
+          idx <- match(paste0("beta_total[", q, ",", ki, "]"),
+                       dimnames(bt)[[3]])
+          if (!is.na(idx)) {
+            add(paste0(map$factors[ki], "_total"), ":=", map$covariates[q],
+                summarize_var(bt[, , idx, drop = FALSE]))
           }
         }
       }

@@ -39,6 +39,19 @@
 #'   sub-dimensions.  Free loadings require at least three sub-dimensions per
 #'   hyper-factor for identification; two-child blocks automatically fall
 #'   back to unity loadings with a warning.
+#' @param covariate_identification How the covariate decomposition is
+#'   identified when a hyper-factor and all of its children are targeted
+#'   simultaneously (Bayesian engine only). `"sum_to_zero"` (default)
+#'   imposes the exact within-block constraint described in Details;
+#'   `"prior"` imposes no constraint and lets the coefficient priors anchor
+#'   the split, reproducing the conventional blavaan-style
+#'   parameterization. Under `"prior"` the child coefficients do not sum to
+#'   zero and the hyper-level coefficient is a prior-shrunken mean of the
+#'   children's total effects, so the estimand depends on the prior scale
+#'   ratio and on the number of detected facets; a prior sensitivity check
+#'   should accompany results reported this way. The constraint is the
+#'   limiting case of `"prior"` as the hyper-coefficient prior becomes
+#'   diffuse relative to the child priors.
 #' @param standardize_covariates Logical; if `TRUE` (default), continuous
 #'   and ordered-categorical covariates with more than two distinct values
 #'   are z-standardized before estimation, while binary covariates are kept
@@ -73,7 +86,13 @@
 #'   (defaults to `chains`), `threads_per_chain` (within-chain
 #'   parallelism via `reduce_sum`; default 1), `opencl_ids` (e.g.
 #'   `c(0, 0)` to enable GPU acceleration via OpenCL), `iter_warmup`
-#'   (1000), `iter_sampling` (1000), `adapt_delta` (.9), `refresh`.
+#'   (1000), `iter_sampling` (1000), `adapt_delta` (.9), `refresh`,
+#'   `rho_floor` (.05; see Details), and `priors` (a named list overriding
+#'   any prior in the generated program). Regression coefficients default
+#'   to `normal(0, 0.5)` for standardized covariates, following Warncke &
+#'   Azevedo (n.d.), and `normal(0, 1)` for raw binary predictors (one raw
+#'   unit is about two predictor SDs for a balanced binary variable, so the
+#'   doubled scale preserves the same per-SD regularization).
 #' @param force_recompile Logical; if `TRUE`, any cached Stan executable
 #'   for the generated program is deleted before compilation, forcing a
 #'   full rebuild (Bayesian engine only; ignored by the ML engine). This is
@@ -111,8 +130,10 @@
 #' shifting a constant out of every child coefficient and into the
 #' hyper-level coefficient is exactly likelihood-invariant, so the
 #' decomposition is a flat ridge that only the priors would resolve --
-#' with prior-dependent estimands and severely degraded MCMC mixing as
-#' the practical symptoms. Under `hyper_loadings = "unity"` the Bayesian
+#' with prior-dependent estimands, and (where the residual shared
+#' variance is also small) severely degraded MCMC mixing as the
+#' practical symptoms. Under `hyper_loadings = "unity"` and the default
+#' `covariate_identification = "sum_to_zero"`, the Bayesian
 #' engine therefore imposes an exact sum-to-zero constraint on the child
 #' coefficients within every fully targeted hyper-block (implemented
 #' through a marginal-variance-preserving orthonormal contrast basis).
@@ -126,7 +147,23 @@
 #' covariate effect. Under `hyper_loadings = "free"` no analogous fixed
 #' constraint exists (the symmetry-consistent version is loading-weighted
 #' and parameter-dependent); the engine instead emits a warning that the
-#' hyper/child split remains identified only through the priors. Under
+#' hyper/child split remains identified only through the priors.
+#' Setting `covariate_identification = "prior"` deliberately selects that
+#' soft, prior-anchored identification for the unity case too. It leaves
+#' the coefficients unconstrained and reproduces the conventional
+#' blavaan-style parameterization, in which the ridge settles at the
+#' penalized projection
+#' \eqn{\alpha^* = \sum_k \delta_k t_k / (s_\beta^2/s_\alpha^2 +
+#' \sum_k \delta_k^2)}: the hyper-level coefficient is a shrunken
+#' (loading-weighted) mean of the children's total effects \eqn{t_k},
+#' and the child coefficients retain a common residue of the shared
+#' effect rather than summing to zero. This is a legitimate Bayesian
+#' identification strategy provided its two dependencies are reported --
+#' the split is a function of the prior scale ratio, and the shrinkage
+#' factor drifts toward one as the number of detected facets grows, so
+#' the hyper-level estimand is not directly comparable across item pools
+#' of different size. Under either strategy the total effects are what
+#' the likelihood identifies. Under
 #' the ML engine the same redundancy manifests as inflated standard
 #' errors, as documented. With covariates present, the reported
 #' within-block correlation `rho_g` is conditional on the covariates, not
@@ -136,7 +173,12 @@
 #' near-symmetries of the posterior, so the sign relabeling re-derives
 #' the reported coefficients per draw from sign-corrected total effects
 #' (reducing exactly to the ordinary correction whenever a block's signs
-#' are uniform). If the posterior median of `rho_g` for a
+#' are uniform). This applies under both identification strategies, with
+#' the appropriate group action in each: a lone child reflection leaves the
+#' hyper-level coefficient invariant while negating that child's total, so
+#' under `"prior"` the hyper coefficient's own prior-anchored posterior is
+#' left untouched rather than being sharpened by the correction.
+#' If the posterior median of `rho_g` for a
 #' covariate-targeted block falls below `bayes_args$rho_floor` (default
 #' 0.05), a diagnostic warning notes that the hyper level is empirically
 #' vacuous conditional on the covariates -- typically because a covariate
@@ -159,6 +201,8 @@ DimSEM_estimate <- function(proposal,
                             model_syntax = NULL,
                             include_hyper = TRUE,
                             hyper_loadings = c("unity", "free"),
+                            covariate_identification = c("sum_to_zero",
+                                                         "prior"),
                             standardize_covariates = TRUE,
                             engine = c("ml", "bayes"),
                             estimator = "MLR",
@@ -171,6 +215,7 @@ DimSEM_estimate <- function(proposal,
                             verbose = TRUE) {
   engine <- match.arg(engine)
   hyper_loadings <- match.arg(hyper_loadings)
+  covariate_identification <- match.arg(covariate_identification)
   t_start <- Sys.time()
 
   pb <- .dimsem_stage_progress(
@@ -235,6 +280,7 @@ DimSEM_estimate <- function(proposal,
       spec = spec, syntax = syntax, data = est_data,
       covariates = covariates, covariate_targets = covariate_targets,
       covariate_info = covariate_info, hyper_loadings = hyper_loadings,
+      covariate_identification = covariate_identification,
       bayes_args = bayes_args, force_recompile = force_recompile,
       seed = seed, verbose = verbose
     )
@@ -250,6 +296,7 @@ DimSEM_estimate <- function(proposal,
       proposal_source = spec$source,
       hyper_blocks = spec$hyper_blocks,
       hyper_loadings = hyper_loadings,
+      covariate_identification = covariate_identification,
       covariates = covariates,
       covariate_scaling = covariate_info
     ),

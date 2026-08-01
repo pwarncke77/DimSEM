@@ -12,6 +12,7 @@ DimSEM_estimate(
   model_syntax = NULL,
   include_hyper = TRUE,
   hyper_loadings = c("unity", "free"),
+  covariate_identification = c("sum_to_zero", "prior"),
   standardize_covariates = TRUE,
   engine = c("ml", "bayes"),
   estimator = "MLR",
@@ -71,6 +72,20 @@ sub-dimensions.  Free loadings require at least three sub-dimensions per
 hyper-factor for identification; two-child blocks automatically fall
 back to unity loadings with a warning.}
 
+\item{covariate_identification}{How the covariate decomposition is
+identified when a hyper-factor and all of its children are targeted
+simultaneously (Bayesian engine only). \code{"sum_to_zero"} (default)
+imposes the exact within-block constraint described in Details;
+\code{"prior"} imposes no constraint and lets the coefficient priors anchor
+the split, reproducing the conventional blavaan-style
+parameterization. Under \code{"prior"} the child coefficients do not sum to
+zero and the hyper-level coefficient is a prior-shrunken mean of the
+children's total effects, so the estimand depends on the prior scale
+ratio and on the number of detected facets; a prior sensitivity check
+should accompany results reported this way. The constraint is the
+limiting case of \code{"prior"} as the hyper-coefficient prior becomes
+diffuse relative to the child priors.}
+
 \item{standardize_covariates}{Logical; if \code{TRUE} (default), continuous
 and ordered-categorical covariates with more than two distinct values
 are z-standardized before estimation, while binary covariates are kept
@@ -103,7 +118,13 @@ ordered-logistic item model), \code{chains} (4), \code{parallel_chains}
 (defaults to \code{chains}), \code{threads_per_chain} (within-chain
 parallelism via \code{reduce_sum}; default 1), \code{opencl_ids} (e.g.
 \code{c(0, 0)} to enable GPU acceleration via OpenCL), \code{iter_warmup}
-(1000), \code{iter_sampling} (1000), \code{adapt_delta} (.9), \code{refresh}.}
+(1000), \code{iter_sampling} (1000), \code{adapt_delta} (.9), \code{refresh},
+\code{rho_floor} (.05; see Details), and \code{priors} (a named list overriding
+any prior in the generated program). Regression coefficients default
+to \code{normal(0, 0.5)} for standardized covariates, following Warncke &
+Azevedo (n.d.), and \code{normal(0, 1)} for raw binary predictors (one raw
+unit is about two predictor SDs for a balanced binary variable, so the
+doubled scale preserves the same per-SD regularization).}
 
 \item{force_recompile}{Logical; if \code{TRUE}, any cached Stan executable
 for the generated program is deleted before compilation, forcing a
@@ -160,8 +181,10 @@ total effects (child coefficient plus loading-weighted hyper path);
 shifting a constant out of every child coefficient and into the
 hyper-level coefficient is exactly likelihood-invariant, so the
 decomposition is a flat ridge that only the priors would resolve --
-with prior-dependent estimands and severely degraded MCMC mixing as
-the practical symptoms. Under \code{hyper_loadings = "unity"} the Bayesian
+with prior-dependent estimands, and (where the residual shared
+variance is also small) severely degraded MCMC mixing as the
+practical symptoms. Under \code{hyper_loadings = "unity"} and the default
+\code{covariate_identification = "sum_to_zero"}, the Bayesian
 engine therefore imposes an exact sum-to-zero constraint on the child
 coefficients within every fully targeted hyper-block (implemented
 through a marginal-variance-preserving orthonormal contrast basis).
@@ -175,7 +198,23 @@ negative value indicates a below-average, not necessarily an opposing,
 covariate effect. Under \code{hyper_loadings = "free"} no analogous fixed
 constraint exists (the symmetry-consistent version is loading-weighted
 and parameter-dependent); the engine instead emits a warning that the
-hyper/child split remains identified only through the priors. Under
+hyper/child split remains identified only through the priors.
+Setting \code{covariate_identification = "prior"} deliberately selects that
+soft, prior-anchored identification for the unity case too. It leaves
+the coefficients unconstrained and reproduces the conventional
+blavaan-style parameterization, in which the ridge settles at the
+penalized projection
+\eqn{\alpha^* = \sum_k \delta_k t_k / (s_\beta^2/s_\alpha^2 +
+\sum_k \delta_k^2)}: the hyper-level coefficient is a shrunken
+(loading-weighted) mean of the children's total effects \eqn{t_k},
+and the child coefficients retain a common residue of the shared
+effect rather than summing to zero. This is a legitimate Bayesian
+identification strategy provided its two dependencies are reported --
+the split is a function of the prior scale ratio, and the shrinkage
+factor drifts toward one as the number of detected facets grows, so
+the hyper-level estimand is not directly comparable across item pools
+of different size. Under either strategy the total effects are what
+the likelihood identifies. Under
 the ML engine the same redundancy manifests as inflated standard
 errors, as documented. With covariates present, the reported
 within-block correlation \code{rho_g} is conditional on the covariates, not
@@ -185,7 +224,12 @@ shared variance is negligible, per-factor reflections become
 near-symmetries of the posterior, so the sign relabeling re-derives
 the reported coefficients per draw from sign-corrected total effects
 (reducing exactly to the ordinary correction whenever a block's signs
-are uniform). If the posterior median of \code{rho_g} for a
+are uniform). This applies under both identification strategies, with
+the appropriate group action in each: a lone child reflection leaves the
+hyper-level coefficient invariant while negating that child's total, so
+under \code{"prior"} the hyper coefficient's own prior-anchored posterior is
+left untouched rather than being sharpened by the correction.
+If the posterior median of \code{rho_g} for a
 covariate-targeted block falls below \code{bayes_args$rho_floor} (default
 0.05), a diagnostic warning notes that the hyper level is empirically
 vacuous conditional on the covariates -- typically because a covariate

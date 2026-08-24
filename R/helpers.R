@@ -2588,7 +2588,7 @@
 ")
 
   gq_block <- paste0(
-"generated quantities {
+    "generated quantities {
   // In-iterations sign relabeling (blavaan convention; Merkle et al.,
   // 2021; evaluated in Chen, Miocevic, & Falk, 2025): the likelihood is
   // reflection-invariant, so raw *_un draws may occupy mirror modes
@@ -2600,37 +2600,37 @@
   vector[K] sign_f;
   vector[P] lambda;
 ",
-if (has_cov)
-"  matrix[Q, K] beta_f_cor;
+    if (has_cov)
+      "  matrix[Q, K] beta_f_cor;
 " else "",
-if (has_hyper)
-"  vector[G] sign_g;
+    if (has_hyper)
+      "  vector[G] sign_g;
 " else "",
-if (free_hyper)
-"  vector[K] delta;
+    if (free_hyper)
+      "  vector[K] delta;
   vector[K] delta_std;
 " else "",
-if (has_cov && has_hyper)
-"  matrix[Q, G] beta_g_cor;
+    if (has_cov && has_hyper)
+      "  matrix[Q, G] beta_g_cor;
   matrix[Q, K] beta_total;                // likelihood-identified totals
 " else "",
-if (has_hyper && !free_hyper)
-"  vector[G] rho_g;
+    if (has_hyper && !free_hyper)
+      "  vector[G] rho_g;
 " else "",
-"  for (k in 1:K) {
+    "  for (k in 1:K) {
     sign_f[k] = lambda_un[ref_item[k]] < 0 ? -1 : 1;
   }
   for (p in 1:P) {
     lambda[p] = sign_f[item_factor[p]] * lambda_un[p];
   }
 ",
-if (has_cov)
-"  for (k in 1:K) {
+    if (has_cov)
+      "  for (k in 1:K) {
     beta_f_cor[, k] = sign_f[k] * beta_f[, k];
   }
 " else "",
-if (free_hyper)
-"  {
+    if (free_hyper)
+      "  {
     vector[K] delta_tmp;
     for (k in 1:K) delta_tmp[k] = sign_f[k] * delta_l[k];
     for (g in 1:G) sign_g[g] = delta_tmp[ref_child[g]] < 0 ? -1 : 1;
@@ -2641,19 +2641,19 @@ if (free_hyper)
     }
   }
 " else "",
-if (has_hyper && !free_hyper)
-"  // Unity loadings: per-factor reflection is only a joint block
+    if (has_hyper && !free_hyper)
+      "  // Unity loadings: per-factor reflection is only a joint block
   // symmetry, so the hyper orientation follows its reference child.
   for (g in 1:G) sign_g[g] = sign_f[ref_child[g]];
   for (g in 1:G) rho_g[g] = square(tau_g[g]) / (square(tau_g[g]) + 1);
 " else "",
-if (has_cov && has_hyper)
-"  for (g in 1:G) {
+    if (has_cov && has_hyper)
+      "  for (g in 1:G) {
     beta_g_cor[, g] = sign_g[g] * beta_g[, g];
   }
 " else "",
-if (has_cov && has_hyper && !free_hyper)
-"  // Orbit-invariant decomposition of the covariate effects.
+    if (has_cov && has_hyper && !free_hyper)
+      "  // Orbit-invariant decomposition of the covariate effects.
   //
   // Under unity loadings the only EXACT sign symmetry is the joint flip
   // of a whole block (all children plus G), under which alpha and every
@@ -2704,8 +2704,8 @@ if (has_cov && has_hyper && !free_hyper)
     }
   }
 " else "",
-if (has_cov && has_hyper) paste0(
-"  // Total covariate effect on each child dimension: the quantity the
+    if (has_cov && has_hyper) paste0(
+      "  // Total covariate effect on each child dimension: the quantity the
   // LIKELIHOOD identifies, invariant to how the alpha/beta split is
   // conventionalized (sum-to-zero or prior-anchored) and to the sign
   // orbit. Report these for claims the data alone support.
@@ -2721,7 +2721,7 @@ if (has_cov && has_hyper) paste0(
   }
 ") else "",
 
-"}
+    "}
 ")
 
   paste0(functions_block, data_block, params_block, transformed_block,
@@ -3163,6 +3163,14 @@ if (has_cov && has_hyper) paste0(
     refresh = bayes_args$refresh %||% if (isTRUE(verbose)) 100L else 0L,
     seed = seed %||% sample.int(.Machine$integer.max, 1L)
   )
+  # Pass-through for the remaining cmdstanr sampler controls, so a run can be
+  # matched against another engine's settings (e.g. blavaan's
+  # control = list(adapt_delta = , max_treedepth = )).
+  if (!is.null(bayes_args$max_treedepth)) {
+    sample_args$max_treedepth <- bayes_args$max_treedepth
+  }
+  if (!is.null(bayes_args$init)) sample_args$init <- bayes_args$init
+  if (!is.null(bayes_args$step_size)) sample_args$step_size <- bayes_args$step_size
   if (threads > 1L) sample_args$threads_per_chain <- threads
   if (!is.null(opencl_ids)) sample_args$opencl_ids <- opencl_ids
 
@@ -3265,7 +3273,7 @@ if (has_cov && has_hyper) paste0(
   ), priors)
 
   data_block <- paste0(
-"data {
+    "data {
   int<lower=1> N;
   int<lower=1> P;
   int<lower=1> K;
@@ -3276,24 +3284,24 @@ if (has_cov && has_hyper) paste0(
   array[n_obs] int<lower=1, upper=P> obs_col;
   array[n_obs] int<lower=1> eta_idx;      // (factor-1)*N + row: gather index
 ",
-if (identical(likelihood, "normal"))
-"  vector[n_obs] y_obs;
+    if (identical(likelihood, "normal"))
+      "  vector[n_obs] y_obs;
 " else
-"  array[n_obs] int y_int;                 // entries sorted by item
+  "  array[n_obs] int y_int;                 // entries sorted by item
   array[P] int<lower=0> seg_start;        // per-item segment bounds
   array[P] int<lower=0> seg_end;          // seg_end < seg_start = no obs
   int<lower=2> max_cat;
   array[P] int<lower=2> n_cat;
 ",
-if (has_hyper)
-"  int<lower=1> G;
+  if (has_hyper)
+    "  int<lower=1> G;
   array[K] int<lower=0, upper=G> factor_hyper;
 " else "",
-if (has_hyper)
-"  array[G] int<lower=1, upper=K> ref_child;   // sign-reference child per hyper
+  if (has_hyper)
+    "  array[G] int<lower=1, upper=K> ref_child;   // sign-reference child per hyper
 " else "",
-if (has_cov)
-"  int<lower=1> Q;
+  if (has_cov)
+    "  int<lower=1> Q;
   matrix[N, Q] X;
   array[Q] int<lower=0, upper=1> x_binary;
   array[K] int<lower=0, upper=1> reg_f;
@@ -3301,15 +3309,15 @@ if (has_cov)
   matrix[K_free, K] beta_basis;           // identification basis
                                           // (see .dimsem_beta_basis)
 " else "",
-if (has_cov && has_hyper)
-"  array[G] int<lower=0, upper=1> reg_g;
+  if (has_cov && has_hyper)
+    "  array[G] int<lower=0, upper=1> reg_g;
   array[G] int<lower=0, upper=1> ctr_g;   // sum-to-zero-constrained block?
 " else "",
-"}
+  "}
 ")
 
   params_block <- paste0(
-"parameters {
+    "parameters {
   vector[P] lambda_un;                    // unconstrained; sign handled by
                                           // in-iterations relabeling in the
                                           // generated quantities (blavaan
@@ -3318,73 +3326,73 @@ if (has_cov && has_hyper)
   vector<lower=0>[P] sigma;
   matrix[N, K] z_f;
 ",
-if (has_hyper)
-"  matrix[N, G] z_g;
+    if (has_hyper)
+      "  matrix[N, G] z_g;
 " else "",
-if (has_hyper && !free_hyper)
-"  vector<lower=0>[G] tau_g;
+    if (has_hyper && !free_hyper)
+      "  vector<lower=0>[G] tau_g;
 " else "",
-if (free_hyper)
-"  vector[K] delta_un;                     // unconstrained hyper loadings
+    if (free_hyper)
+      "  vector[K] delta_un;                     // unconstrained hyper loadings
 " else "",
-if (has_cov)
-"  matrix[Q, K_free] beta_free;            // free covariate coordinates
+    if (has_cov)
+      "  matrix[Q, K_free] beta_free;            // free covariate coordinates
 " else "",
-if (has_cov && has_hyper)
-"  matrix[Q, G] beta_g;
+    if (has_cov && has_hyper)
+      "  matrix[Q, G] beta_g;
 " else "",
-if (identical(likelihood, "ordinal"))
-"  array[P] ordered[max_cat - 1] cut;
+    if (identical(likelihood, "ordinal"))
+      "  array[P] ordered[max_cat - 1] cut;
 " else "",
-"}
+    "}
 ")
 
   transformed_block <- paste0(
-"transformed parameters {
+    "transformed parameters {
 ",
-if (has_cov)
-"  // Covariate slopes through the identification basis (sum-to-zero
+    if (has_cov)
+      "  // Covariate slopes through the identification basis (sum-to-zero
   // within fully targeted unity hyper-blocks; structural zeros for
   // untargeted factors) -- see .dimsem_beta_basis().
   matrix[Q, K] beta_f = beta_free * beta_basis;
 " else "",
-if (free_hyper)
-"  vector[K] delta_l;
+    if (free_hyper)
+      "  vector[K] delta_l;
 " else "",
-if (has_hyper)
-"  matrix[N, G] g_score;
+    if (has_hyper)
+      "  matrix[N, G] g_score;
 " else "",
-"  matrix[N, K] eta;
+    "  matrix[N, K] eta;
 ",
-if (free_hyper)
-"  for (k in 1:K) {
+    if (free_hyper)
+      "  for (k in 1:K) {
     delta_l[k] = factor_hyper[k] == 0 ? 0 : delta_un[k];
   }
 " else "",
-if (has_hyper) paste0(
-"  for (g in 1:G) {
+    if (has_hyper) paste0(
+      "  for (g in 1:G) {
     g_score[, g] = ", if (has_cov) "X * beta_g[, g] + " else "",
-                     if (free_hyper) "z_g[, g];"
-                     else "tau_g[g] * z_g[, g];",
-"
+      if (free_hyper) "z_g[, g];"
+      else "tau_g[g] * z_g[, g];",
+      "
   }
 "),
-"  for (k in 1:K) {
+    "  for (k in 1:K) {
     eta[, k] = ",
-if (has_cov) "(reg_f[k] == 1 ? X * beta_f[, k] : rep_vector(0, N)) + " else "",
-if (has_hyper && !free_hyper)
-"(factor_hyper[k] > 0 ? g_score[, factor_hyper[k]] : rep_vector(0, N)) + "
-else "",
-if (free_hyper)
-"(factor_hyper[k] > 0 ? delta_l[k] * g_score[, factor_hyper[k]] : rep_vector(0, N)) + "
-else "",
-"z_f[, k];
+    if (has_cov) "(reg_f[k] == 1 ? X * beta_f[, k] : rep_vector(0, N)) + " else "",
+    if (has_hyper && !free_hyper)
+      "(factor_hyper[k] > 0 ? g_score[, factor_hyper[k]] : rep_vector(0, N)) + "
+    else "",
+    if (free_hyper)
+      "(factor_hyper[k] > 0 ? delta_l[k] * g_score[, factor_hyper[k]] : rep_vector(0, N)) + "
+    else "",
+    "z_f[, k];
   }
 }
 ")
 
   likelihood_block <- if (identical(likelihood, "normal")) paste0(
-"
+    "
   // Fully vectorized likelihood: one OpenCL-eligible statement over all
   // observed entries; the mean is assembled from vectorized gathers only.
   {
@@ -3393,7 +3401,7 @@ else "",
     target += normal_lpdf(y_obs | mu, sigma[obs_col]);
   }
 ") else paste0(
-"
+  "
   // Per-item vectorized ordered-logistic calls over contiguous pre-sorted
   // segments: each call shares one cutpoint vector, no scalar loops over
   // observations.
@@ -3413,21 +3421,21 @@ else "",
 ")
 
   model_block <- paste0(
-"model {
+    "model {
   lambda_un ~ ", pr$lambda, ";
   nu ~ ", pr$nu, ";
   sigma ~ ", pr$sigma, ";
   to_vector(z_f) ~ std_normal();
 ",
-if (has_hyper)
-"  to_vector(z_g) ~ std_normal();
+    if (has_hyper)
+      "  to_vector(z_g) ~ std_normal();
 " else "",
-if (has_hyper && !free_hyper) paste0("  tau_g ~ ", pr$tau_g, ";
+    if (has_hyper && !free_hyper) paste0("  tau_g ~ ", pr$tau_g, ";
 ") else "",
-if (free_hyper) paste0("  delta_un ~ ", pr$delta, ";
+    if (free_hyper) paste0("  delta_un ~ ", pr$delta, ";
 ") else "",
-if (has_cov) paste0(
-"  // Priors act on the free coordinates; the contrast basis is
+    if (has_cov) paste0(
+      "  // Priors act on the free coordinates; the contrast basis is
   // marginal-variance-preserving, and the scales match the CPU
   // generator (normal(0, 0.5); doubled for raw binary predictors).
   for (q in 1:Q) {
@@ -3438,8 +3446,8 @@ if (has_cov) paste0(
     }
   }
 ") else "",
-if (has_cov && has_hyper) paste0(
-"  for (q in 1:Q) {
+    if (has_cov && has_hyper) paste0(
+      "  for (q in 1:Q) {
     if (x_binary[q] == 1) {
       beta_g[q] ~ ", pr$beta_binary, ";
     } else {
@@ -3447,15 +3455,15 @@ if (has_cov && has_hyper) paste0(
     }
   }
 ") else "",
-if (identical(likelihood, "ordinal")) paste0(
-"  for (p in 1:P) cut[p] ~ ", pr$cut, ";
+    if (identical(likelihood, "ordinal")) paste0(
+      "  for (p in 1:P) cut[p] ~ ", pr$cut, ";
 ") else "",
-likelihood_block,
-"}
+    likelihood_block,
+    "}
 ")
 
   gq_block <- paste0(
-"generated quantities {
+    "generated quantities {
   // In-iterations sign relabeling (blavaan convention; Merkle et al.,
   // 2021; evaluated in Chen, Miocevic, & Falk, 2025): the likelihood is
   // reflection-invariant, so raw *_un draws may occupy mirror modes
@@ -3467,37 +3475,37 @@ likelihood_block,
   vector[K] sign_f;
   vector[P] lambda;
 ",
-if (has_cov)
-"  matrix[Q, K] beta_f_cor;
+    if (has_cov)
+      "  matrix[Q, K] beta_f_cor;
 " else "",
-if (has_hyper)
-"  vector[G] sign_g;
+    if (has_hyper)
+      "  vector[G] sign_g;
 " else "",
-if (free_hyper)
-"  vector[K] delta;
+    if (free_hyper)
+      "  vector[K] delta;
   vector[K] delta_std;
 " else "",
-if (has_cov && has_hyper)
-"  matrix[Q, G] beta_g_cor;
+    if (has_cov && has_hyper)
+      "  matrix[Q, G] beta_g_cor;
   matrix[Q, K] beta_total;                // likelihood-identified totals
 " else "",
-if (has_hyper && !free_hyper)
-"  vector[G] rho_g;
+    if (has_hyper && !free_hyper)
+      "  vector[G] rho_g;
 " else "",
-"  for (k in 1:K) {
+    "  for (k in 1:K) {
     sign_f[k] = lambda_un[ref_item[k]] < 0 ? -1 : 1;
   }
   for (p in 1:P) {
     lambda[p] = sign_f[item_factor[p]] * lambda_un[p];
   }
 ",
-if (has_cov)
-"  for (k in 1:K) {
+    if (has_cov)
+      "  for (k in 1:K) {
     beta_f_cor[, k] = sign_f[k] * beta_f[, k];
   }
 " else "",
-if (free_hyper)
-"  {
+    if (free_hyper)
+      "  {
     vector[K] delta_tmp;
     for (k in 1:K) delta_tmp[k] = sign_f[k] * delta_l[k];
     for (g in 1:G) sign_g[g] = delta_tmp[ref_child[g]] < 0 ? -1 : 1;
@@ -3508,19 +3516,19 @@ if (free_hyper)
     }
   }
 " else "",
-if (has_hyper && !free_hyper)
-"  // Unity loadings: per-factor reflection is only a joint block
+    if (has_hyper && !free_hyper)
+      "  // Unity loadings: per-factor reflection is only a joint block
   // symmetry, so the hyper orientation follows its reference child.
   for (g in 1:G) sign_g[g] = sign_f[ref_child[g]];
   for (g in 1:G) rho_g[g] = square(tau_g[g]) / (square(tau_g[g]) + 1);
 " else "",
-if (has_cov && has_hyper)
-"  for (g in 1:G) {
+    if (has_cov && has_hyper)
+      "  for (g in 1:G) {
     beta_g_cor[, g] = sign_g[g] * beta_g[, g];
   }
 " else "",
-if (has_cov && has_hyper && !free_hyper)
-"  // Orbit-invariant decomposition of the covariate effects (see the CPU
+    if (has_cov && has_hyper && !free_hyper)
+      "  // Orbit-invariant decomposition of the covariate effects (see the CPU
   // generator's note): constrained blocks re-derive alpha as the mean of
   // the sign-corrected totals; unconstrained but G-targeted blocks undo a
   // general sign pattern via beta_f_cor = sign_f[k] * (beta_f[k] +
@@ -3556,8 +3564,8 @@ if (has_cov && has_hyper && !free_hyper)
     }
   }
 " else "",
-if (has_cov && has_hyper) paste0(
-"  // Total covariate effect on each child dimension: the quantity the
+    if (has_cov && has_hyper) paste0(
+      "  // Total covariate effect on each child dimension: the quantity the
   // LIKELIHOOD identifies, invariant to how the alpha/beta split is
   // conventionalized (sum-to-zero or prior-anchored) and to the sign
   // orbit. Report these for claims the data alone support.
@@ -3573,7 +3581,7 @@ if (has_cov && has_hyper) paste0(
   }
 ") else "",
 
-"}
+    "}
 ")
 
   paste0(data_block, params_block, transformed_block, model_block, gq_block)

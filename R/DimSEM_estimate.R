@@ -86,7 +86,8 @@
 #'   (defaults to `chains`), `threads_per_chain` (within-chain
 #'   parallelism via `reduce_sum`; default 1), `opencl_ids` (e.g.
 #'   `c(0, 0)` to enable GPU acceleration via OpenCL), `iter_warmup`
-#'   (1000), `iter_sampling` (1000), `adapt_delta` (.9), `refresh`,
+#'   (1000), `iter_sampling` (1000), `adapt_delta` (.9), `max_treedepth`,
+#'   `init`, `step_size`, `refresh`,
 #'   `rho_floor` (.05; see Details), and `priors` (a named list overriding
 #'   any prior in the generated program). Regression coefficients default
 #'   to `normal(0, 0.5)` for standardized covariates, following Warncke &

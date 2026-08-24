@@ -118,7 +118,8 @@ ordered-logistic item model), \code{chains} (4), \code{parallel_chains}
 (defaults to \code{chains}), \code{threads_per_chain} (within-chain
 parallelism via \code{reduce_sum}; default 1), \code{opencl_ids} (e.g.
 \code{c(0, 0)} to enable GPU acceleration via OpenCL), \code{iter_warmup}
-(1000), \code{iter_sampling} (1000), \code{adapt_delta} (.9), \code{refresh},
+(1000), \code{iter_sampling} (1000), \code{adapt_delta} (.9), \code{max_treedepth},
+\code{init}, \code{step_size}, \code{refresh},
 \code{rho_floor} (.05; see Details), and \code{priors} (a named list overriding
 any prior in the generated program). Regression coefficients default
 to \code{normal(0, 0.5)} for standardized covariates, following Warncke &

@@ -28,23 +28,36 @@
 #'   of the form `item_1`, `item_2`, ...
 #' @param ega_args Optional named list of arguments passed to [EGAnet::EGA()].
 #'   Defaults are merged with `list(corr = "auto", model = "glasso",
-#'   algorithm = "louvain", consensus.method = "lowest_tefi",
-#'   uni.method = "louvain", plot.EGA = FALSE)`; apart from the Louvain
-#'   algorithm and the TEFI consensus rule, these match [EGAnet::EGA()]'s
-#'   own defaults, so an unproblematic solution is identical to a plain
-#'   `EGAnet::EGA()` call. By default, DimSEM additionally
-#'   enforces a minimum community size of three items via Louvain
-#'   resolution annealing: the first solution is estimated at EGAnet's
-#'   default resolution, and whenever it contains a community
-#'   of fewer than `min_community_size` (default 3) items that is connected
-#'   to the rest of the network, the Louvain `resolution` parameter is
-#'   lowered from `resolution_start` (default 1.2) in decrements of
+#'   algorithm = "walktrap", anneal_algorithm = "louvain",
+#'   consensus.method = "lowest_tefi", uni.method = "louvain",
+#'   plot.EGA = FALSE)`; apart from the TEFI consensus rule these match
+#'   [EGAnet::EGA()]'s own defaults, so an unproblematic solution is
+#'   identical to a plain `EGAnet::EGA()` call.
+#'
+#'   Community detection proceeds in two phases, mirroring the workflow of
+#'   Warncke & Azevedo (n.d.). The first pass uses `algorithm` (default
+#'   `"walktrap"`). DimSEM then enforces a minimum community size of three
+#'   items via resolution annealing: whenever a solution contains a
+#'   community of fewer than `min_community_size` (default 3) items that is
+#'   connected to the rest of the network, the search switches to
+#'   `anneal_algorithm` (default `"louvain"`) and lowers its `resolution`
+#'   from `resolution_start` (default 1.2) in decrements of
 #'   `resolution_step` (default 0.01) -- the first rung of the ladder being
-#'   `resolution_start - resolution_step` -- coarsening the partition,
-#'   until all
-#'   communities reach the minimum size or `resolution_min` (default 0.05)
-#'   is hit. Data that satisfy the rule outright are therefore never
-#'   re-estimated at a non-default resolution. Sub-threshold communities that form their own disconnected
+#'   `resolution_start - resolution_step` -- coarsening the partition until
+#'   all communities reach the minimum size or `resolution_min` (default
+#'   0.05) is hit. The algorithm switch is structural rather than
+#'   stylistic: walktrap has no resolution parameter, so annealing requires
+#'   a resolution-aware algorithm (`"louvain"` or `"leiden"`). Data that
+#'   satisfy the size rule outright are never re-estimated, and are
+#'   therefore reported exactly as `algorithm` found them.
+#'
+#'   Note that the two algorithms can disagree substantially: on the ANES
+#'   2000 32-item battery walktrap returns five communities and
+#'   consensus-Louvain four, stably across seeds. Setting
+#'   `algorithm = "louvain"` makes Louvain the initial pass as well. The
+#'   accepted solution's provenance is recorded in
+#'   `proposal$results$EGA$algorithm`, with the two phase settings in
+#'   `$algorithm_initial` and `$algorithm_anneal`. Sub-threshold communities that form their own disconnected
 #'   network component (isolated items or isolated doublets) can never be
 #'   merged by coarsening and are instead converted to unassigned orphans
 #'   (NA), as are any communities still below the threshold at the

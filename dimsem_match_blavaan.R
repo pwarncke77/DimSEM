@@ -368,9 +368,13 @@ DimSEM_standardize_surviving <- function(object, sd_x, prob = 0.95,
 # source("DimSEM_standardize_surviving.R")
 #
 sd_x <- sd(range_0_1(anes2000TS$party), na.rm = TRUE)   # ~0.345
+sd_x
 
 std_free <- DimSEM_standardize_surviving(fit_free, sd_x)
 std_stz  <- DimSEM_standardize_surviving(fit_stz,  sd_x)
+
+std_free
+std_stz
 
 # print(std_free, row.names = FALSE, digits = 3)
 # print(attr(std_free, "ridge"), row.names = FALSE, digits = 3)

@@ -75,7 +75,9 @@ back to unity loadings with a warning.}
 \item{covariate_identification}{How the covariate decomposition is
 identified when a hyper-factor and all of its children are targeted
 simultaneously (Bayesian engine only). \code{"sum_to_zero"} (default)
-imposes the exact within-block constraint described in Details;
+imposes the exact within-block constraint described in Details --
+unweighted under \code{hyper_loadings = "unity"}, loading-weighted under
+\code{"free"};
 \code{"prior"} imposes no constraint and lets the coefficient priors anchor
 the split, reproducing the conventional blavaan-style
 parameterization. Under \code{"prior"} the child coefficients do not sum to
@@ -197,9 +199,23 @@ deviation from the mean. Child coefficients within a constrained block
 are consequently contrasts: they sum to zero by construction, and a
 negative value indicates a below-average, not necessarily an opposing,
 covariate effect. Under \code{hyper_loadings = "free"} no analogous fixed
-constraint exists (the symmetry-consistent version is loading-weighted
-and parameter-dependent); the engine instead emits a warning that the
-hyper/child split remains identified only through the priors.
+constraint is loading-weighted, \eqn{\sum_k \delta_k \beta_k = 0}. Since
+the loadings are sampled, it cannot be pre-built as a fixed basis and is
+applied instead as a runtime projection inside the Stan program, giving
+\eqn{\alpha = \sum_k \delta_k t_k / \sum_k \delta_k^2} -- the
+loading-weighted component of the children's total effects -- with each
+child coefficient the residual from it.
+
+Which loading mode to pair the constraint with is a modelling decision,
+not a formality. \code{"unity"} fixes both the hyper loadings and the facet
+disturbance variances, which forces every pairwise facet correlation to
+the same value; when the facets relate to the hyper factor at genuinely
+different strengths, the single hyper variance is driven toward its lower
+boundary and the boundary-adjacent geometry degrades mixing for that
+variance and for everything downstream of it (the \code{rho_g} diagnostic
+below flags this). \code{"free"} expresses the same heterogeneity through
+unconstrained loadings, which have no boundary, so the constraint is
+available without the compound-symmetry restriction.
 Setting \code{covariate_identification = "prior"} deliberately selects that
 soft, prior-anchored identification for the unity case too. It leaves
 the coefficients unconstrained and reproduces the conventional

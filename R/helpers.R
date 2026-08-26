@@ -1993,7 +1993,7 @@
       } else {
         paste0("Neither imposing a single nor multiple hyper-factors is ",
                "supported: the level-1 dimensions behave as mutually ",
-               "independent (personality-like) structures.")
+               "independent structures.")
       }
     },
     single = paste0(
@@ -2002,7 +2002,7 @@
         paste0(" is supported, with ", paste(res$orphans, collapse = ", "),
                " left as stand-alone dimension(s).")
       } else {
-        " is supported (family-resemblance / ideology-like structure)."
+        " is supported (family-resemblance structure)."
       }),
     multiple = paste0("Multiple hyper-factors are supported: ",
                       fmt_blocks(res), "."),
@@ -2437,7 +2437,8 @@
 ",
     if (has_cov && has_hyper)
       "  array[G] int<lower=0, upper=1> reg_g;
-  array[G] int<lower=0, upper=1> ctr_g;    // sum-to-zero-constrained block?
+  array[G] int<lower=0, upper=1> ctr_g;    // fixed-basis sum-to-zero block?
+  array[G] int<lower=0, upper=1> prj_g;    // delta-weighted projection block?
 " else "",
     if (identical(likelihood, "ordinal"))
       "  int<lower=2> max_cat;
@@ -2505,6 +2506,53 @@
     if (free_hyper)
       "  for (k in 1:K) {
     delta_l[k] = factor_hyper[k] == 0 ? 0 : delta_un[k];
+  }
+" else "",
+    if (free_hyper && has_cov)
+      "  // Delta-weighted sum-to-zero projection (free loadings).
+  //
+  // Under free loadings the flat direction is alpha -> alpha + c,
+  // beta_k -> beta_k - delta_k*c, so the symmetry-consistent constraint is
+  // sum_k delta_k*beta_k = 0 -- delta-weighted, and delta is a parameter, so
+  // it cannot be pre-built as a data basis the way the unity case is.
+  // Instead the sampled coefficients are projected onto the orthogonal
+  // complement of delta at every iteration:
+  //     beta <- beta - delta * (delta'beta)/(delta'delta)
+  // The constraint then holds exactly, per draw, and the hyper-level
+  // coefficient is automatically the delta-weighted least-squares component
+  // of the children's total effects, alpha = sum(delta*t)/sum(delta^2).
+  //
+  // Note the projection is invariant to the sign orbit: a per-factor
+  // reflection flips delta_k and beta_k together, so each product
+  // delta_k*beta_k -- and hence the constraint -- is unchanged. Building it
+  // from the unconstrained delta_un is therefore equivalent to building it
+  // from the sign-corrected delta.
+  //
+  // The pre-projection coefficients carry one redundant direction per block
+  // (the component along delta), which the likelihood does not see. It is
+  // exactly Gaussian at the prior scale and does not interact with anything
+  // else, so it samples from its prior without pathology; it is scaffolding
+  // and is never reported.
+  for (g in 1:G) {
+    if (prj_g[g] == 1) {
+      for (q in 1:Q) {
+        real num = 0;
+        real den = 0;
+        for (k in 1:K) {
+          if (factor_hyper[k] == g) {
+            num += delta_l[k] * beta_f[q, k];
+            den += square(delta_l[k]);
+          }
+        }
+        if (den > 1e-12) {
+          for (k in 1:K) {
+            if (factor_hyper[k] == g) {
+              beta_f[q, k] -= delta_l[k] * num / den;
+            }
+          }
+        }
+      }
+    }
   }
 " else "",
     if (has_hyper) paste0(
@@ -2836,10 +2884,13 @@ if (has_cov && has_hyper) paste0(
       # derived from sign-corrected totals (robust to the tau -> 0
       # regime, where per-factor reflections become near-symmetries).
       sd$ctr_g <- as.integer(seq_along(hyper_names) %in% bb$constrained)
+      # Blocks taking the delta-weighted runtime projection (free loadings).
+      sd$prj_g <- as.integer(seq_along(hyper_names) %in% bb$weighted)
     }
     attr(sd, "identification") <- list(
       strategy = covariate_identification,
       eligible = bb$eligible, constrained = bb$constrained,
+      weighted = bb$weighted,
       hyper_names = hyper_names)
   }
 
@@ -2886,14 +2937,38 @@ if (has_cov && has_hyper) paste0(
 # reflection touching a block is the JOINT flip of all children plus G,
 # which negates every beta_k together and preserves the zero sum.
 #
-# Under FREE loadings no analogous fixed constraint is imposed. The
-# symmetry-consistent analogue is loading-weighted (sum_k delta_k beta_k =
-# 0; per-child reflections flip delta_k and beta_k jointly, leaving each
-# product invariant), but it is parameter-dependent and numerically
-# unstable exactly where it matters (the projection divides by
-# sum(delta^2), which wanders near zero when the residual shared variance
-# is small). The engine therefore leaves the free-loadings decomposition
-# soft-identified and warns (see .dimsem_estimate_bayes()).
+# Under FREE loadings the symmetry-consistent analogue is loading-weighted:
+# sum_k delta_k beta_k = 0 (per-child reflections flip delta_k and beta_k
+# jointly, leaving each product -- and hence the constraint -- invariant).
+# Because delta is sampled, this cannot be pre-built as a data basis; it is
+# applied instead as a RUNTIME PROJECTION inside the Stan program,
+#     beta <- beta - delta * (delta'beta) / (delta'delta)
+# guarded by den > 1e-12 for the degenerate case where the whole block's
+# loadings collapse to zero (there the hyper factor carries no variance and
+# no decomposition is meaningful anyway).
+#
+# Why this matters beyond bookkeeping. The unity mode fixes BOTH delta = 1
+# and the facet disturbance variance at 1, which forces every pairwise facet
+# correlation to tau^2/(tau^2+1) -- compound symmetry. When the facets
+# actually relate to the hyper factor at different strengths, that single
+# tau^2 is dragged toward its lower boundary, and the resulting
+# boundary-adjacent geometry destroys mixing for tau and everything
+# downstream of it. Free loadings express the same heterogeneity through
+# delta_k, which are unconstrained interior parameters with no boundary at
+# all, so the constraint becomes available without buying compound symmetry
+# along with it.
+#
+# Induced prior. The projection is applied to coefficients carrying an
+# i.i.d. normal(0, s_beta) prior, so within a projected block the implied
+# marginal prior on each child coefficient is
+# normal(0, s_beta * sqrt(1 - delta_k^2 / sum(delta^2))) -- mildly
+# heteroscedastic by construction, because a child that loads strongly on
+# the hyper factor has more of its coefficient absorbed by the constraint.
+# Under unity (delta == 1) this reduces to the uniform
+# s_beta * sqrt(1 - 1/m), which the fixed Helmert basis rescales to exactly
+# s_beta. The free-loadings case is left unscaled: no single constant can
+# equalize marginals that differ across k, and rescaling per child would
+# break the constraint.
 #
 # `covariate_identification` selects the strategy explicitly:
 #   * "sum_to_zero" (default) -- the hard constraint described above,
@@ -2948,12 +3023,20 @@ if (has_cov && has_hyper) paste0(
       eligible <- c(eligible, g)
     }
   }
-  constrained <- if (identical(hyper_loadings, "unity") &&
-                     identical(covariate_identification, "sum_to_zero")) {
-    eligible
-  } else {
-    integer(0)
-  }
+  # Two ways of imposing the constraint, chosen by the loading mode:
+  #   unity -> `constrained`: a FIXED Helmert contrast basis, built here and
+  #            passed to Stan as data (delta == 1, so the constraint is the
+  #            plain sum-to-zero and does not depend on any parameter).
+  #   free  -> `weighted`:    a RUNTIME projection inside the Stan program,
+  #            because the symmetry-consistent constraint is
+  #            sum_k delta_k * beta_k = 0 and delta is sampled. The basis
+  #            stays the identity for these factors; the projection is applied
+  #            in transformed parameters (see .dimsem_stan_model).
+  stz <- identical(covariate_identification, "sum_to_zero")
+  constrained <- if (identical(hyper_loadings, "unity") && stz) eligible
+                 else integer(0)
+  weighted <- if (identical(hyper_loadings, "free") && stz) eligible
+              else integer(0)
 
   rows <- list()
   handled <- rep(FALSE, K)
@@ -2986,7 +3069,7 @@ if (has_cov && has_hyper) paste0(
     matrix(numeric(0), nrow = 0L, ncol = K)
   }
   list(K_free = nrow(basis), basis = basis,
-       eligible = eligible, constrained = constrained)
+       eligible = eligible, constrained = constrained, weighted = weighted)
 }
 
 # Bayesian engine driver. backend = "cmdstanr" compiles and samples
@@ -3074,7 +3157,20 @@ if (has_cov && has_hyper) paste0(
   # are flagged, with the message keyed to WHY they were left soft.
   id_info <- attr(stan_data, "identification") %||%
     list(strategy = covariate_identification, eligible = integer(0),
-         constrained = integer(0), hyper_names = character(0))
+         constrained = integer(0), weighted = integer(0),
+         hyper_names = character(0))
+  if (length(id_info$weighted) > 0 && isTRUE(verbose)) {
+    message("Covariate identification: delta-weighted sum-to-zero constraint ",
+            "on child-dimension coefficients within hyper-block(s) ",
+            paste(id_info$hyper_names[id_info$weighted], collapse = ", "),
+            " (per covariate), applied as a runtime projection. The ",
+            "hyper-level coefficient is thereby identified as the ",
+            "loading-weighted component of the children's total covariate ",
+            "effects, alpha = sum(delta*t)/sum(delta^2), and each child ",
+            "coefficient as the residual from it. Free hyper loadings leave ",
+            "the facet correlation structure unrestricted, so no ",
+            "compound-symmetry assumption is imposed.")
+  }
   if (length(id_info$constrained) > 0 && isTRUE(verbose)) {
     message("Covariate identification: exact sum-to-zero constraint on ",
             "child-dimension coefficients within hyper-block(s) ",
@@ -3085,33 +3181,28 @@ if (has_cov && has_hyper) paste0(
             "covariate effects; each child coefficient as that ",
             "dimension's deviation from the mean.")
   }
-  soft <- setdiff(id_info$eligible, id_info$constrained)
-  if (length(soft) > 0) {
-    blocks <- paste(id_info$hyper_names[soft], collapse = ", ")
-    if (identical(covariate_identification, "prior")) {
-      if (isTRUE(verbose)) {
-        message("Covariate identification: prior-anchored (soft) for ",
-                "hyper-block(s) ", blocks, ". The likelihood informs only ",
-                "the total effects (child + hyper coefficient); their ",
-                "split is set by the coefficient priors, so the ",
-                "hyper-level coefficient is a shrunken mean of the ",
-                "children's total effects and the child coefficients do ",
-                "not sum to zero. The split depends on the prior scale ",
-                "ratio and on the number of detected facets -- report a ",
-                "prior sensitivity check, and prefer the total effects ",
-                "for claims the data alone support.")
-      }
-    } else {
-      warning("With hyper_loadings = \"free\", covariates target hyper-",
-              "block(s) ", blocks,
-              " and ALL of their children simultaneously. The likelihood ",
-              "then informs only the delta-weighted total effects; the ",
-              "split between the hyper-level coefficient and the child ",
-              "coefficients is identified only softly by the priors. ",
-              "Interpret the individual coefficients cautiously, or use ",
-              "hyper_loadings = \"unity\", where an exact sum-to-zero ",
-              "identification applies.", call. = FALSE)
-    }
+  # A redundant block left unconstrained can now only mean the user asked for
+  # covariate_identification = "prior": under "sum_to_zero" every eligible
+  # block is covered, by the fixed Helmert basis when the hyper loadings are
+  # fixed at unity and by the delta-weighted runtime projection when they are
+  # free. (Before the weighted projection existed, free loadings fell through
+  # to a soft-identification warning here; that branch is now unreachable and
+  # has been removed rather than left as scaffolding.) Choosing "prior" is a
+  # deliberate decision, so this reports rather than warns.
+  soft <- setdiff(id_info$eligible,
+                  c(id_info$constrained, id_info$weighted))
+  if (length(soft) > 0 && isTRUE(verbose)) {
+    message("Covariate identification: prior-anchored (soft) for ",
+            "hyper-block(s) ",
+            paste(id_info$hyper_names[soft], collapse = ", "),
+            ". The likelihood informs only the total effects (child + ",
+            "hyper coefficient); their split is set by the coefficient ",
+            "priors, so the hyper-level coefficient is a shrunken mean of ",
+            "the children's total effects and the child coefficients do ",
+            "not sum to zero. The split depends on the prior scale ratio ",
+            "and on the number of detected facets -- report a prior ",
+            "sensitivity check, and prefer the total effects for claims ",
+            "the data alone support.")
   }
   stan <- list(model_code = stan_code, data = stan_data,
                likelihood = likelihood, hyper_loadings = hyper_loadings,
@@ -3322,7 +3413,8 @@ if (has_cov)
 " else "",
 if (has_cov && has_hyper)
 "  array[G] int<lower=0, upper=1> reg_g;
-  array[G] int<lower=0, upper=1> ctr_g;   // sum-to-zero-constrained block?
+  array[G] int<lower=0, upper=1> ctr_g;   // fixed-basis sum-to-zero block?
+  array[G] int<lower=0, upper=1> prj_g;   // delta-weighted projection block?
 " else "",
 "}
 ")
@@ -3378,6 +3470,33 @@ if (has_hyper)
 if (free_hyper)
 "  for (k in 1:K) {
     delta_l[k] = factor_hyper[k] == 0 ? 0 : delta_un[k];
+  }
+" else "",
+if (free_hyper && has_cov)
+"  // Delta-weighted sum-to-zero projection (free loadings); see the CPU
+  // generator for the rationale. beta <- beta - delta*(delta'beta)/(delta'delta),
+  // applied per covariate within each flagged block, so the constraint holds
+  // exactly at every iteration and is invariant to the sign orbit.
+  for (g in 1:G) {
+    if (prj_g[g] == 1) {
+      for (q in 1:Q) {
+        real num = 0;
+        real den = 0;
+        for (k in 1:K) {
+          if (factor_hyper[k] == g) {
+            num += delta_l[k] * beta_f[q, k];
+            den += square(delta_l[k]);
+          }
+        }
+        if (den > 1e-12) {
+          for (k in 1:K) {
+            if (factor_hyper[k] == g) {
+              beta_f[q, k] -= delta_l[k] * num / den;
+            }
+          }
+        }
+      }
+    }
   }
 " else "",
 if (has_hyper) paste0(

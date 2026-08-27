@@ -89,6 +89,7 @@
 #'   parallelism via `reduce_sum`; default 1), `opencl_ids` (e.g.
 #'   `c(0, 0)` to enable GPU acceleration via OpenCL), `iter_warmup`
 #'   (1000), `iter_sampling` (1000), `adapt_delta` (.9), `max_treedepth`,
+#'   `hyper_scale`, `hyper_param`, `marginal` (see Details),
 #'   `init`, `step_size`, `refresh`,
 #'   `rho_floor` (.05; see Details), and `priors` (a named list overriding
 #'   any prior in the generated program). Regression coefficients default
@@ -184,7 +185,71 @@
 #' the ML engine the same redundancy manifests as inflated standard
 #' errors, as documented. With covariates present, the reported
 #' within-block correlation `rho_g` is conditional on the covariates, not
-#' the marginal correlation. Within constrained blocks the reported
+#' the marginal correlation.
+#'
+#' \strong{Marginalized likelihood.} `bayes_args$marginal = TRUE` switches
+#' to a program that integrates the latent disturbances out analytically
+#' instead of sampling them. In the default program the hyper-factor scale
+#' multiplies an \eqn{N}-dimensional cloud of latent disturbances, so every
+#' move in that scale requires all \eqn{N} of them to rescale coherently --
+#' something a single global step size cannot do. On a 1807-respondent ANES
+#' battery this capped effective sample size for the hyper variance at
+#' roughly 20-35 and, as a `blavaan` cross-check established, biased it
+#' downward, because the chains never left the low-variance region. Longer
+#' chains, a bounded reparameterization and centering all failed to lift it.
+#'
+#' Since everything in the normal-likelihood model is Gaussian, the latents
+#' can be integrated out exactly. Writing \eqn{t_k} for the total covariate
+#' effect on facet \eqn{k}, the marginal moments per respondent are
+#' \eqn{E[y_j] = \nu_j + \lambda_j X t_{k(j)}} and a covariance that is
+#' diagonal plus rank \eqn{K + G}: one column per facet carrying its own
+#' loadings, one per hyper-block carrying the loadings weighted by the
+#' parent. Evaluated with the Woodbury identity and the matrix determinant
+#' lemma, at \eqn{O(P_{obs} R^2)} per missingness pattern rather than
+#' \eqn{O(P_{obs}^3)}, with one Cholesky factorization per pattern shared by
+#' its respondents. No latent cloud survives and the hyper scale becomes an
+#' ordinary smooth parameter inside a covariance matrix.
+#'
+#' Restrictions: normal likelihood only (ordinal latents cannot be
+#' integrated out in closed form), mutually exclusive with the GPU program
+#' (the work is a Cholesky per pattern, not one large vectorized density),
+#' and latent factor scores are not sampled. Identification, the sum-to-zero
+#' machinery and the sign relabeling are all unchanged -- marginalization
+#' alters only how the likelihood is evaluated, not the model.
+#'
+#' \strong{Hyper-disturbance parameterization.} Under `hyper_loadings =
+#' "unity"` the hyper factor carries a free variance, and when the data pull
+#' that variance toward zero the sampler must work against a boundary: the
+#' latent disturbance it multiplies becomes unidentified there, and effective
+#' sample size for the variance -- and for everything whose scale depends on
+#' it -- collapses. Two `bayes_args` switches address this, and they are
+#' independent:
+#' \itemize{
+#'   \item `hyper_scale`: `"tau"` (default) samples the hyper SD directly
+#'     against a lower bound of zero. `"rho"` instead samples the implied
+#'     within-block correlation on \eqn{(0, 1)} and derives
+#'     \eqn{\tau = \sqrt{\rho/(1-\rho)}}. The sampler then works on
+#'     \eqn{\mathrm{logit}(\rho)}, a bounded and better-scaled coordinate,
+#'     and the prior (`bayes_args$priors$rho_g`, default `beta(2, 8)`, whose
+#'     density vanishes at both ends) keeps mass off the degenerate point at
+#'     which the hyper factor disappears. Excluding that point is consistent
+#'     with a block that the permutation test in [DimSEM_propose()] has
+#'     already validated as non-independent, but it is a deliberate prior
+#'     choice and should be reported with a sensitivity check.
+#'   \item `hyper_param`: `"noncentered"` (default) samples the disturbances
+#'     as \eqn{\tau \times} standard normal; `"centered"` samples them on
+#'     their own scale. Neither dominates: centering is more efficient when
+#'     the likelihood is informative about the disturbance relative to its
+#'     prior, non-centering when it is not. Since the prior precision is
+#'     \eqn{1/\tau^2}, the comparison depends on where \eqn{\tau} sits --
+#'     so the two switches interact, and centering typically pays off only
+#'     once `hyper_scale = "rho"` has moved \eqn{\rho} away from zero. Test
+#'     `"rho"` alone first, then add centering.
+#' }
+#' Both switches concern the hyper-factor disturbance only. Under
+#' `hyper_loadings = "free"` the hyper variance is fixed at 1, the two
+#' parameterizations are the same program, and both settings are ignored with
+#' a warning. Within constrained blocks the reported
 #' decomposition is additionally made orbit-invariant: when the residual
 #' shared variance is negligible, per-factor reflections become
 #' near-symmetries of the posterior, so the sign relabeling re-derives

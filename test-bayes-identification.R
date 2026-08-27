@@ -88,7 +88,7 @@ test_that("weighted projection satisfies its constraint and reduces to unity", {
   expect_equal(project(g, rep(0, 4)), g, tolerance = 1e-12)
 })
 
-test_that("dry run reports the weighted constraint without the soft warning", {
+test_that("dry run reports the weighted constraint; prior reports, never warns", {
   set.seed(42)
   n <- 40L
   items <- paste0("it", 1:9)
@@ -110,7 +110,7 @@ test_that("dry run reports the weighted constraint without the soft warning", {
   expect_identical(fit$stan$data$ctr_g, 0L)
   expect_identical(fit$stan$identification$weighted, 1L)
 
-  # the free-loadings soft-identification warning must NOT fire any more
+  # No warning under free + sum_to_zero: the block is genuinely constrained.
   expect_no_warning(
     suppressMessages(.dimsem_estimate_bayes(
       spec, syntax = "", data = dat, covariates = "cov",
@@ -118,13 +118,131 @@ test_that("dry run reports the weighted constraint without the soft warning", {
       covariate_identification = "sum_to_zero",
       bayes_args = list(backend = "dry_run"), verbose = FALSE))
   )
-  # but it still fires under "prior"
+
+  # Under "prior" the split is left soft BY REQUEST, so the engine reports it
+  # rather than warning -- and only when verbose. (Before the weighted
+  # projection existed, free loadings raised a warning here; that branch is
+  # now unreachable, since every eligible block under "sum_to_zero" is
+  # covered by one of the two constraint routes.)
+  expect_message(
+    fit_p <- .dimsem_estimate_bayes(
+      spec, syntax = "", data = dat, covariates = "cov",
+      covariate_targets = "all", hyper_loadings = "free",
+      covariate_identification = "prior",
+      bayes_args = list(backend = "dry_run"), verbose = TRUE),
+    "prior-anchored"
+  )
+  expect_identical(fit_p$stan$data$prj_g, 0L)
+  expect_identical(fit_p$stan$identification$weighted, integer(0))
+  expect_identical(fit_p$stan$identification$eligible, 1L)
+
+  # verbose = FALSE stays silent on both channels.
+  expect_no_warning(
+    expect_no_message(.dimsem_estimate_bayes(
+      spec, syntax = "", data = dat, covariates = "cov",
+      covariate_targets = "all", hyper_loadings = "free",
+      covariate_identification = "prior",
+      bayes_args = list(backend = "dry_run"), verbose = FALSE))
+  )
+})
+
+
+test_that("hyper_scale and hyper_param emit the right Stan under unity", {
+  for (gen in list(.dimsem_stan_model, .dimsem_stan_model_gpu)) {
+    base <- gen(likelihood = "normal", n_hyper = 1L, n_cov = 1L,
+                hyper_loadings = "unity")
+    rho  <- gen(likelihood = "normal", n_hyper = 1L, n_cov = 1L,
+                hyper_loadings = "unity", hyper_scale = "rho")
+    cen  <- gen(likelihood = "normal", n_hyper = 1L, n_cov = 1L,
+                hyper_loadings = "unity", hyper_param = "centered")
+    both <- gen(likelihood = "normal", n_hyper = 1L, n_cov = 1L,
+                hyper_loadings = "unity", hyper_scale = "rho",
+                hyper_param = "centered")
+    for (code in list(base, rho, cen, both)) {
+      ch <- strsplit(code, "")[[1]]
+      expect_identical(sum(ch == "{"), sum(ch == "}"))
+      # tau_g must be declared exactly once -- as a parameter or as a
+      # transformed parameter, never both and never neither.
+      n_par <- length(gregexpr("vector<lower=0>\\[G\\] tau_g;", code)[[1]][
+        gregexpr("vector<lower=0>\\[G\\] tau_g;", code)[[1]] > 0])
+      n_tp  <- length(gregexpr("tau_g = sqrt\\(rho_par", code)[[1]][
+        gregexpr("tau_g = sqrt\\(rho_par", code)[[1]] > 0])
+      expect_identical(n_par + n_tp, 1L)
+    }
+    # default is unchanged
+    expect_false(grepl("rho_par", base))
+    expect_false(grepl("g_resid", base))
+    expect_match(base, "tau_g\\[g\\] \\* z_g\\[, g\\]", all = FALSE)
+    
+    # rho scale: bounded parameter, derived tau, beta prior, no raw tau prior
+    expect_match(rho, "vector<lower=0, upper=1>\\[G\\] rho_par", all = FALSE)
+    expect_match(rho, "tau_g = sqrt\\(rho_par", all = FALSE)
+    expect_match(rho, "rho_par ~ beta\\(2, 8\\)", all = FALSE)
+    expect_false(grepl("tau_g ~ ", rho))
+    
+    # centered: disturbances sampled on their own scale
+    expect_match(cen, "matrix\\[N, G\\] g_resid", all = FALSE)
+    expect_match(cen, "g_resid\\[, g\\] ~ normal\\(0, tau_g\\[g\\]\\)",
+                 all = FALSE)
+    expect_false(grepl("to_vector\\(z_g\\) ~ std_normal", cen))
+    expect_match(cen, "g_score\\[, g\\] = X \\* beta_g\\[, g\\] \\+ g_resid",
+                 all = FALSE)
+    
+    # both compose
+    expect_match(both, "rho_par ~ beta", all = FALSE)
+    expect_match(both, "g_resid\\[, g\\] ~ normal\\(0, tau_g\\[g\\]\\)",
+                 all = FALSE)
+    
+    # custom rho prior is honoured
+    r2 <- gen(likelihood = "normal", n_hyper = 1L, n_cov = 1L,
+              hyper_loadings = "unity", hyper_scale = "rho",
+              priors = list(rho_g = "beta(3, 3)"))
+    expect_match(r2, "rho_par ~ beta\\(3, 3\\)", all = FALSE)
+  }
+})
+
+test_that("the switches are inert under free loadings", {
+  for (gen in list(.dimsem_stan_model, .dimsem_stan_model_gpu)) {
+    f0 <- gen(likelihood = "normal", n_hyper = 1L, n_cov = 1L,
+              hyper_loadings = "free")
+    f1 <- gen(likelihood = "normal", n_hyper = 1L, n_cov = 1L,
+              hyper_loadings = "free", hyper_scale = "rho",
+              hyper_param = "centered")
+    expect_identical(f0, f1)          # var(G) = 1: same program either way
+    expect_false(grepl("rho_par", f1))
+    expect_false(grepl("g_resid", f1))
+  }
+})
+
+test_that("driver resolves the switches, reports them, and warns under free", {
+  set.seed(42)
+  n <- 40L
+  items <- paste0("it", 1:9)
+  dat <- as.data.frame(matrix(rnorm(n * 9), n, 9,
+                              dimnames = list(NULL, items)))
+  dat$cov <- rnorm(n)
+  spec <- list(partition = setNames(rep(1:3, each = 3), items),
+               hyper_blocks = list(G1 = c("F1", "F2", "F3")))
+  expect_message(
+    f <- .dimsem_estimate_bayes(
+      spec, syntax = "", data = dat, covariates = "cov",
+      covariate_targets = "all", hyper_loadings = "unity",
+      covariate_identification = "sum_to_zero",
+      bayes_args = list(backend = "dry_run", hyper_scale = "rho"),
+      verbose = TRUE),
+    "scale = rho"
+  )
+  expect_match(f$stan$model_code, "rho_par ~ beta", all = FALSE)
+  
+  # ignored (with a warning) under free loadings
   expect_warning(
     suppressMessages(.dimsem_estimate_bayes(
       spec, syntax = "", data = dat, covariates = "cov",
       covariate_targets = "all", hyper_loadings = "free",
-      covariate_identification = "prior",
-      bayes_args = list(backend = "dry_run"), verbose = FALSE)),
-    "identified only softly"
+      covariate_identification = "sum_to_zero",
+      bayes_args = list(backend = "dry_run", hyper_param = "centered"),
+      verbose = FALSE)),
+    "ignored here"
   )
 })
+

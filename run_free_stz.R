@@ -56,6 +56,9 @@ check_weighted_constraint <- function(fit, label = "") {
 # likelihood. Judge the trial on ordering, on the constraint holding, and on
 # coverage -- not on exact equality.
 
+devtools::document()
+devtools::load_all()
+
 data(toy_simple_cov)
 items_toy <- letters[1:12]
 
@@ -143,29 +146,33 @@ blav_priors <- list(
 
 dat_x_complete <- dat_ds[!is.na(dat_ds$party_scale),]
 
-# fit_wstz <- DimSEM_estimate(
-#   prop32, data = dat_x_complete,
-#   covariates = "party_scale", covariate_targets = "all",
-#   engine = "bayes",
-#   hyper_loadings = "unity",
-#   covariate_identification = "sum_to_zero",
-#   standardize_covariates = FALSE,
-#   bayes_args = list(
-#     chains = 16L, parallel_chains = 16L,
-#     iter_warmup = 800L, iter_sampling = 1600L,
-#     adapt_delta = 0.95, max_treedepth = 20L,
-#     likelihood = "normal", priors = blav_priors
-#   ),seed = 123)
-#
-# saveRDS(fit_wstz, "dimsem_32_party_unity_stz.rds")
+fit_wstz <- DimSEM_estimate(
+  prop32, data = dat_x_complete,
+  covariates = "party_scale", covariate_targets = "all",
+  engine = "bayes",
+  hyper_loadings = "unity",
+  covariate_identification = "sum_to_zero",
+  standardize_covariates = FALSE,
+  bayes_args = list(
+    chains = 16L, parallel_chains = 16L,
+    iter_warmup = 800L, iter_sampling = 1600L,
+    adapt_delta = 0.95, max_treedepth = 20L,
+    likelihood = "normal", priors = blav_priors,
+    hyper_scale = "rho"),
+  seed = 123)
+
+saveRDS(fit_wstz, "dimsem_32_party_unity_stz.rds")
 fit_wstz <- readRDS("dimsem_32_party_unity_stz.rds")
 tab_wstz <- DimSEM_parameterEstimates(fit_wstz)
 
+grepl("rho_par", fit_wstz$stan$model_code)
+grepl("rho_par ~ beta", fit_wstz$stan$model_code)
+
 sd_x <- sd(range_0_1(anes2000TS$party), na.rm = TRUE)
+write.csv(tab_wstz, "dimsem_32_party_unity_stz.csv", row.names = FALSE)
 tab_stnd <- DimSEM_standardize_surviving(fit_wstz, sd_x)
 # tab_stnd <- DimSEM_standardized(fit_wstz) ## Error in object$covariate_scaling$standardized[[cv]] : subscript out of bounds
 
-write.csv(tab_wstz, "dimsem_32_party_unity_stz.csv", row.names = FALSE)
 
 # =============================================================================
 # SECTION 3 -- verification and three-way comparison

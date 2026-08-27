@@ -2357,11 +2357,20 @@
 .dimsem_stan_model <- function(likelihood = c("normal", "ordinal"),
                                n_hyper = 0L, n_cov = 0L,
                                hyper_loadings = "free",
+                               hyper_scale = c("tau", "rho"),
+                               hyper_param = c("noncentered", "centered"),
                                priors = list()) {
   likelihood <- match.arg(likelihood)
+  hyper_scale <- match.arg(hyper_scale)
+  hyper_param <- match.arg(hyper_param)
   has_hyper <- n_hyper > 0L
   has_cov <- n_cov > 0L
   free_hyper <- has_hyper && identical(hyper_loadings, "free")
+  # Both options concern the hyper-factor DISTURBANCE, which exists as a free
+  # scale only under unity loadings; under free loadings var(G) = 1 and the
+  # centered and non-centered forms are literally the same program.
+  rho_scale <- has_hyper && !free_hyper && identical(hyper_scale, "rho")
+  centered  <- has_hyper && !free_hyper && identical(hyper_param, "centered")
 
   # Prior defaults; any entry can be overridden via bayes_args$priors.
   pr <- .dimsem_merge_args(list(
@@ -2369,6 +2378,7 @@
     nu = "normal(0, 5)",
     sigma = "student_t(3, 0, 2)",
     tau_g = "student_t(3, 0, 2)",
+    rho_g = "beta(2, 8)",
     delta = "normal(0, 2)",
     beta = "normal(0, 0.5)",
     beta_binary = "normal(0, 1)",
@@ -2458,11 +2468,26 @@
   vector<lower=0>[P] sigma;               // item residual scales
   matrix[N, K] z_f;                       // std-normal factor innovations
 ",
-    if (has_hyper)
-      "  matrix[N, G] z_g;
+    if (has_hyper && !centered)
+      "  matrix[N, G] z_g;                       // std-normal hyper innovations
 " else "",
-    if (has_hyper && !free_hyper)
+    if (centered)
+      "  matrix[N, G] g_resid;                   // hyper disturbances, CENTERED
+                                          // parameterization: sampled on
+                                          // their own scale rather than as
+                                          // tau_g * std_normal
+" else "",
+    if (has_hyper && !free_hyper && !rho_scale)
       "  vector<lower=0>[G] tau_g;               // hyper-factor SDs (free)
+" else "",
+    if (rho_scale)
+      "  vector<lower=0, upper=1>[G] rho_par;    // implied within-block
+                                          // correlation, sampled directly.
+                                          // tau_g is derived from it, so the
+                                          // sampler works on logit(rho) --
+                                          // a bounded, well-scaled coordinate
+                                          // rather than a variance pinned
+                                          // against zero.
 " else "",
     if (free_hyper)
       "  vector[K] delta_un;                     // unconstrained hyper loadings
@@ -2494,6 +2519,12 @@
   // common-beta likelihood ridge). Untargeted columns are structural
   // zeros.
   matrix[Q, K] beta_f = beta_free * beta_basis;
+" else "",
+    if (rho_scale)
+      "  // tau^2 = rho / (1 - rho), the inverse of rho = tau^2/(tau^2+1).
+  // The prior is declared on rho_par itself, so Stan's own (0,1) transform
+  // supplies the Jacobian and none is added by hand.
+  vector<lower=0>[G] tau_g = sqrt(rho_par ./ (1 - rho_par));
 " else "",
     if (free_hyper)
       "  vector[K] delta_l;
@@ -2558,7 +2589,8 @@
     if (has_hyper) paste0(
       "  for (g in 1:G) {
     g_score[, g] = ", if (has_cov) "X * beta_g[, g] + " else "",
-      if (free_hyper) "z_g[, g];   // var(G) = 1 (free loadings)"
+      if (centered) "g_resid[, g];   // centered"
+      else if (free_hyper) "z_g[, g];   // var(G) = 1 (free loadings)"
       else "tau_g[g] * z_g[, g];",
       "
   }
@@ -2585,11 +2617,22 @@
   sigma ~ ", pr$sigma, ";
   to_vector(z_f) ~ std_normal();
 "),
-    if (has_hyper)
+    if (has_hyper && !centered)
       "  to_vector(z_g) ~ std_normal();
 " else "",
-    if (has_hyper && !free_hyper) paste0(
+    if (centered)
+      "  // Centered: the disturbance carries tau_g in its own prior. Preferred
+  // when the likelihood is informative about the disturbance relative to
+  // that prior; the non-centered form is preferred when it is not.
+  for (g in 1:G) {
+    g_resid[, g] ~ normal(0, tau_g[g]);
+  }
+" else "",
+    if (has_hyper && !free_hyper && !rho_scale) paste0(
       "  tau_g ~ ", pr$tau_g, ";
+") else "",
+    if (rho_scale) paste0(
+      "  rho_par ~ ", pr$rho_g, ";
 ") else "",
     if (free_hyper) paste0(
       "  delta_un ~ ", pr$delta, ";
@@ -2778,6 +2821,413 @@ if (has_cov && has_hyper) paste0(
 
 # Build the Stan data list from the estimation spec, in the long
 # observed-entries format (no case deletion, no imputation).
+# --- Marginalized Stan program (normal likelihood only) ----------------------
+#
+# WHY. The default program carries the latent disturbances as explicit
+# parameters: one hyper disturbance u_i per respondent plus K facet
+# disturbances, so the hyper SD multiplies an N-dimensional latent cloud.
+# Every move in that SD requires all N of the u_i to rescale coherently,
+# which a single global step size cannot do. On ANES 2000 that capped bulk
+# ESS for the hyper variance at ~20-35 and -- as a blavaan cross-check
+# established -- BIASED it downward, since the chains never left the
+# low-variance region. Neither longer chains, a bounded (rho)
+# reparameterization, nor centering lifted it.
+#
+# Everything in the normal-likelihood model is Gaussian, so the latents can
+# be integrated out exactly. Writing t_k = beta_k + delta_k * alpha for the
+# total covariate effect on facet k, the marginal moments per respondent are
+#
+#     E[y_ij]   = nu_j + lambda_j * (X_i t_{k(j)})
+#     Cov(y_i)  = Sigma + sum_k c^(k) c^(k)' + sum_g w^(g) w^(g)'
+#
+# with Sigma = diag(sigma^2), c^(k)_j = lambda_j on the items of facet k and
+# zero elsewhere, and w^(g)_j = lambda_j * delta_{k(j)} * tau_g on the items
+# belonging to hyper-block g. That is DIAGONAL PLUS RANK (K + G): no latent
+# cloud survives, and the hyper scale appears only inside a covariance
+# matrix, where it is an ordinary smooth parameter.
+#
+# Evaluated with the Woodbury identity and the matrix determinant lemma, so
+# the cost is O(P_obs * R^2) per missingness pattern rather than O(P_obs^3),
+# with R = K + G. Respondents are pre-sorted by pattern so each pattern's
+# factorization is computed once per iteration and shared.
+#
+# The construction covers BOTH loading modes: under "unity" delta == 1 and
+# tau_g is free, under "free" delta is free and tau_g == 1. The sum-to-zero
+# machinery (beta_basis, prj_g) is untouched -- it operates on beta_f before
+# the mean is formed -- and so is the sign-relabeling, because the symmetry
+# group is unchanged: a joint block flip leaves both c c' and w w' invariant,
+# while a lone facet flip does so only when delta is free, exactly as before.
+#
+# NOT SUPPORTED: the ordinal likelihood (its latents cannot be integrated out
+# in closed form) and latent factor scores (recoverable in generated
+# quantities, not implemented).
+.dimsem_stan_model_marginal <- function(n_hyper = 0L, n_cov = 0L,
+                                        hyper_loadings = "free",
+                                        hyper_scale = c("tau", "rho"),
+                                        priors = list()) {
+  hyper_scale <- match.arg(hyper_scale)
+  has_hyper <- n_hyper > 0L
+  has_cov <- n_cov > 0L
+  free_hyper <- has_hyper && identical(hyper_loadings, "free")
+  rho_scale <- has_hyper && !free_hyper && identical(hyper_scale, "rho")
+
+  pr <- .dimsem_merge_args(
+    list(lambda = "normal(0, 2)", nu = "normal(0, 5)",
+         sigma = "student_t(3, 0, 2)", tau_g = "student_t(3, 0, 2)",
+         rho_g = "beta(2, 8)", delta = "normal(0, 2)",
+         beta = "normal(0, 0.5)", beta_binary = "normal(0, 1)"),
+    priors)
+
+  prog <- paste0(
+"data {
+  int<lower=1> N;                          // respondents (>=1 observed item)
+  int<lower=1> P;                          // items
+  int<lower=1> K;                          // facets
+  matrix[N, P] Y;                          // missing entries unused
+  array[P] int<lower=1, upper=K> item_factor;
+  array[K] int<lower=1, upper=P> ref_item;  // sign-reference item per factor
+  int<lower=1> n_pat;                      // missingness patterns
+  array[n_pat] int<lower=1> pat_r_start;   // respondents sorted by pattern
+  array[n_pat] int<lower=1> pat_r_end;
+  array[n_pat] int<lower=1> pat_i_start;   // slices of pat_items
+  array[n_pat] int<lower=1> pat_i_len;
+  int<lower=1> n_pat_items;
+  array[n_pat_items] int<lower=1, upper=P> pat_items;
+",
+if (has_hyper)
+"  int<lower=1> G;
+  array[K] int<lower=0> factor_hyper;      // 0 = no hyper parent
+  array[G] int<lower=1, upper=K> ref_child; // sign-reference child per block
+" else "",
+if (has_cov)
+"  int<lower=1> Q;
+  matrix[N, Q] X;
+  array[Q] int<lower=0, upper=1> x_binary;
+  array[K] int<lower=0, upper=1> reg_f;
+  int<lower=0> K_free;
+  matrix[K_free, K] beta_basis;
+" else "",
+if (has_cov && has_hyper)
+"  array[G] int<lower=0, upper=1> reg_g;
+  array[G] int<lower=0, upper=1> ctr_g;
+  array[G] int<lower=0, upper=1> prj_g;
+" else "",
+"}
+
+transformed data {
+  int R = K", if (has_hyper) " + G" else "", ";   // covariance rank
+}
+
+parameters {
+  vector[P] lambda_un;                     // sign fixed in generated quantities
+  vector[P] nu;
+  vector<lower=0>[P] sigma;
+",
+if (has_hyper && !free_hyper && !rho_scale)
+"  vector<lower=0>[G] tau_g;
+" else "",
+if (rho_scale)
+"  vector<lower=0, upper=1>[G] rho_par;
+" else "",
+if (free_hyper)
+"  vector[K] delta_un;
+" else "",
+if (has_cov)
+"  matrix[Q, K_free] beta_free;
+" else "",
+if (has_cov && has_hyper)
+"  matrix[Q, G] beta_g;
+" else "",
+"}
+
+transformed parameters {
+",
+if (rho_scale)
+"  vector<lower=0>[G] tau_g = sqrt(rho_par ./ (1 - rho_par));
+" else "",
+if (has_cov)
+"  matrix[Q, K] beta_f = beta_free * beta_basis;
+" else "",
+if (free_hyper)
+"  vector[K] delta_l;
+" else "",
+"  matrix[P, R] U = rep_matrix(0, P, R);   // low-rank covariance factor
+",
+if (free_hyper)
+"  for (k in 1:K) {
+    delta_l[k] = factor_hyper[k] == 0 ? 0 : delta_un[k];
+  }
+" else "",
+if (free_hyper && has_cov)
+"  // delta-weighted sum-to-zero projection (see .dimsem_beta_basis)
+  for (g in 1:G) {
+    if (prj_g[g] == 1) {
+      for (q in 1:Q) {
+        real num = 0;
+        real den = 0;
+        for (k in 1:K) {
+          if (factor_hyper[k] == g) {
+            num += delta_l[k] * beta_f[q, k];
+            den += square(delta_l[k]);
+          }
+        }
+        if (den > 1e-12) {
+          for (k in 1:K) {
+            if (factor_hyper[k] == g) {
+              beta_f[q, k] -= delta_l[k] * num / den;
+            }
+          }
+        }
+      }
+    }
+  }
+" else "",
+"  // Column k of U puts this facet's loadings on its own items: together
+  // these give the block-diagonal within-facet contribution, since
+  // var(z_k) = 1. Column K+g carries the hyper block, weighted by the
+  // loading on the parent (delta under free loadings, tau under unity).
+  for (p in 1:P) {
+    U[p, item_factor[p]] = lambda_un[p];
+  }
+",
+if (has_hyper) paste0(
+"  for (p in 1:P) {
+    int g = factor_hyper[item_factor[p]];
+    if (g > 0) {
+      U[p, K + g] = lambda_un[p] * ",
+  if (free_hyper) "delta_l[item_factor[p]]" else "tau_g[g]", ";
+    }
+  }
+") else "",
+"}
+
+model {
+  lambda_un ~ ", pr$lambda, ";
+  nu ~ ", pr$nu, ";
+  sigma ~ ", pr$sigma, ";
+",
+if (has_hyper && !free_hyper && !rho_scale) paste0("  tau_g ~ ", pr$tau_g, ";
+") else "",
+if (rho_scale) paste0("  rho_par ~ ", pr$rho_g, ";
+") else "",
+if (free_hyper) paste0("  delta_un ~ ", pr$delta, ";
+") else "",
+if (has_cov) paste0(
+"  for (q in 1:Q) {
+    if (x_binary[q] == 1) {
+      beta_free[q] ~ ", pr$beta_binary, ";
+    } else {
+      beta_free[q] ~ ", pr$beta, ";
+    }
+  }
+") else "",
+if (has_cov && has_hyper) paste0(
+"  for (q in 1:Q) {
+    if (x_binary[q] == 1) {
+      beta_g[q] ~ ", pr$beta_binary, ";
+    } else {
+      beta_g[q] ~ ", pr$beta, ";
+    }
+  }
+") else "",
+"
+  {
+    // Model-implied item means. t_k = beta_k + delta_k * alpha is the total
+    // covariate effect on facet k; the marginal item mean is nu_j plus its
+    // loading times that.
+    matrix[N, P] Mu;
+",
+if (has_cov) paste0(
+"    matrix[Q, K] t_mat = beta_f;
+",
+  if (has_hyper) paste0(
+"    for (k in 1:K) {
+      if (factor_hyper[k] > 0) {
+        t_mat[, k] += ", if (free_hyper) "delta_l[k] * " else "",
+"beta_g[, factor_hyper[k]];
+      }
+    }
+") else "",
+"    {
+      matrix[N, K] eta_mean = X * t_mat;
+      for (p in 1:P) {
+        Mu[, p] = nu[p] + lambda_un[p] * eta_mean[, item_factor[p]];
+      }
+    }
+") else
+"    for (p in 1:P) {
+      Mu[, p] = rep_vector(nu[p], N);
+    }
+",
+"
+    // One Cholesky per missingness pattern, shared by its respondents.
+    for (s in 1:n_pat) {
+      int r1 = pat_r_start[s];
+      int r2 = pat_r_end[s];
+      int nr = r2 - r1 + 1;
+      int po = pat_i_len[s];
+      array[po] int obs = segment(pat_items, pat_i_start[s], po);
+      vector[po] dvec = square(sigma[obs]);
+      vector[po] inv_sd = inv_sqrt(dvec);
+      matrix[po, R] A = diag_pre_multiply(inv_sd, U[obs, ]);
+      matrix[R, R] M = add_diag(crossprod(A), 1.0);
+      matrix[R, R] LM = cholesky_decompose(M);
+      real logdet = sum(log(dvec)) + 2 * sum(log(diagonal(LM)));
+      matrix[nr, po] S =
+        diag_post_multiply(Y[r1:r2, obs] - Mu[r1:r2, obs], inv_sd);
+      matrix[nr, R] V = S * A;
+      matrix[R, nr] W = mdivide_left_tri_low(LM, V');
+      target += -0.5 * (nr * (po * log(2 * pi()) + logdet)
+                        + sum(rows_dot_self(S)) - sum(columns_dot_self(W)));
+    }
+  }
+}
+")
+
+  # Generated quantities are identical to the conditional program's: the
+  # parameter names, the sign-relabeling group and the covariate
+  # decomposition are all unchanged by marginalization, which only replaces
+  # how the likelihood is evaluated.
+  gq_block <- paste0(
+"generated quantities {
+  // In-iterations sign relabeling (blavaan convention; Merkle et al.,
+  // 2021; evaluated in Chen, Miocevic, & Falk, 2025): the likelihood is
+  // reflection-invariant, so raw *_un draws may occupy mirror modes
+  // across chains BY DESIGN. Per iteration, each factor is reflected so
+  // its reference item loading is positive, with all sign-bearing
+  // quantities of that factor reflected jointly; hyper orientations
+  // follow their reference child. Report and diagnose these corrected
+  // quantities, never the *_un scaffolding.
+  vector[K] sign_f;
+  vector[P] lambda;
+",
+if (has_cov)
+"  matrix[Q, K] beta_f_cor;
+" else "",
+if (has_hyper)
+"  vector[G] sign_g;
+" else "",
+if (free_hyper)
+"  vector[K] delta;
+  vector[K] delta_std;
+" else "",
+if (has_cov && has_hyper)
+"  matrix[Q, G] beta_g_cor;
+  matrix[Q, K] beta_total;                // likelihood-identified totals
+" else "",
+if (has_hyper && !free_hyper)
+"  vector[G] rho_g;
+" else "",
+"  for (k in 1:K) {
+    sign_f[k] = lambda_un[ref_item[k]] < 0 ? -1 : 1;
+  }
+  for (p in 1:P) {
+    lambda[p] = sign_f[item_factor[p]] * lambda_un[p];
+  }
+",
+if (has_cov)
+"  for (k in 1:K) {
+    beta_f_cor[, k] = sign_f[k] * beta_f[, k];
+  }
+" else "",
+if (free_hyper)
+"  {
+    vector[K] delta_tmp;
+    for (k in 1:K) delta_tmp[k] = sign_f[k] * delta_l[k];
+    for (g in 1:G) sign_g[g] = delta_tmp[ref_child[g]] < 0 ? -1 : 1;
+    for (k in 1:K) {
+      delta[k] = factor_hyper[k] == 0 ? 0
+                 : sign_g[factor_hyper[k]] * delta_tmp[k];
+      delta_std[k] = delta[k] / sqrt(square(delta[k]) + 1);
+    }
+  }
+" else "",
+if (has_hyper && !free_hyper)
+"  // Unity loadings: per-factor reflection is only a joint block
+  // symmetry, so the hyper orientation follows its reference child.
+  for (g in 1:G) sign_g[g] = sign_f[ref_child[g]];
+  for (g in 1:G) rho_g[g] = square(tau_g[g]) / (square(tau_g[g]) + 1);
+" else "",
+if (has_cov && has_hyper)
+"  for (g in 1:G) {
+    beta_g_cor[, g] = sign_g[g] * beta_g[, g];
+  }
+" else "",
+if (has_cov && has_hyper && !free_hyper)
+"  // Orbit-invariant decomposition of the covariate effects.
+  //
+  // Under unity loadings the only EXACT sign symmetry is the joint flip
+  // of a whole block (all children plus G), under which alpha and every
+  // beta negate together -- exactly what the per-factor correction above
+  // implements. As tau_g -> 0, however, the block dissolves and a LONE
+  // child flip becomes a near-symmetry too; its group action is
+  // different: G keeps its orientation, so alpha is INVARIANT while
+  // beta_k -> -beta_k - 2*alpha (the total T_k = beta_k + alpha is what
+  // flips with the factor). Composing the two, a general observed sign
+  // pattern is undone by
+  //     beta_g_cor  = sign_g * beta_g
+  //     beta_f_cor  = sign_f[k] * (beta_f[k] + beta_g) - sign_g * beta_g,
+  // which reduces to sign_f[k] * beta_f[k] whenever the block's signs
+  // are uniform. Note this leaves alpha's own (prior-anchored) posterior
+  // untouched, so it does not manufacture sharpness that the data do not
+  // support -- essential under covariate_identification = \"prior\".
+  // Under the sum-to-zero constraint the reported betas must in addition
+  // sum to zero, which pins alpha to the mean of the sign-corrected
+  // totals; that branch is applied first.
+  for (g in 1:G) {
+    if (ctr_g[g] == 1) {
+      for (q in 1:Q) {
+        real t_sum = 0;
+        int m = 0;
+        for (k in 1:K) {
+          if (factor_hyper[k] == g) {
+            t_sum += sign_f[k] * (beta_f[q, k] + beta_g[q, g]);
+            m += 1;
+          }
+        }
+        beta_g_cor[q, g] = t_sum / m;
+        for (k in 1:K) {
+          if (factor_hyper[k] == g) {
+            beta_f_cor[q, k] = sign_f[k] * (beta_f[q, k] + beta_g[q, g])
+                               - beta_g_cor[q, g];
+          }
+        }
+      }
+    } else if (reg_g[g] == 1) {
+      for (q in 1:Q) {
+        for (k in 1:K) {
+          if (factor_hyper[k] == g && reg_f[k] == 1) {
+            beta_f_cor[q, k] = sign_f[k] * (beta_f[q, k] + beta_g[q, g])
+                               - sign_g[g] * beta_g[q, g];
+          }
+        }
+      }
+    }
+  }
+" else "",
+if (has_cov && has_hyper) paste0(
+"  // Total covariate effect on each child dimension: the quantity the
+  // LIKELIHOOD identifies, invariant to how the alpha/beta split is
+  // conventionalized (sum-to-zero or prior-anchored) and to the sign
+  // orbit. Report these for claims the data alone support.
+  for (q in 1:Q) {
+    for (k in 1:K) {
+      if (factor_hyper[k] == 0 || reg_f[k] == 0) {
+        beta_total[q, k] = beta_f_cor[q, k];
+      } else {
+        beta_total[q, k] = beta_f_cor[q, k]
+                           + ", if (free_hyper) "delta[k]" else "1", " * beta_g_cor[q, factor_hyper[k]];
+      }
+    }
+  }
+") else "",
+
+"}
+")
+
+  paste0(prog, gq_block)
+}
+
 .dimsem_stan_data <- function(spec, data, covariates = NULL,
                               covariate_targets = "all",
                               likelihood = "normal", grainsize = NULL,
@@ -2805,6 +3255,9 @@ if (has_cov && has_hyper) paste0(
 
   sd <- list(
     N = nrow(Y), P = length(items), K = K,
+    # Raw item matrix (NAs intact) for the marginalized program, which needs
+    # the missingness pattern rather than the long observed-entry format.
+    Y_raw = Y,
     item_factor = factor_index, ref_item = ref_item,
     n_obs = nrow(obs), obs_row = unname(obs[, 1]),
     obs_col = unname(obs[, 2]), y_obs = unname(Y[obs]),
@@ -3076,6 +3529,72 @@ if (has_cov && has_hyper) paste0(
 # (with parallel_chains, threads_per_chain, and opencl_ids passed
 # through); backend = "dry_run" returns the generated program and data
 # without requiring a Stan toolchain.
+# Augment the base Stan data list for the marginalized program.
+#
+# The marginal likelihood is evaluated once per missingness pattern, so the
+# respondents are SORTED by pattern here and the row ranges recorded. Any
+# respondent with no observed item contributes nothing and is dropped (with a
+# message); respondents missing only some items are kept in full, consistent
+# with the package's never-delete-cases rule -- the pattern machinery is what
+# makes that possible without imputation.
+#
+# Covariates cannot be missing in the mean structure, so rows with a missing
+# covariate are handled upstream by .dimsem_stan_data() exactly as before.
+.dimsem_stan_data_marginal <- function(sd) {
+  Yraw <- sd$Y_raw
+  if (is.null(Yraw)) {
+    stop("Marginal program needs the raw item matrix; .dimsem_stan_data() ",
+         "did not supply Y_raw.", call. = FALSE)
+  }
+  obs_mat <- !is.na(Yraw)
+  keep <- rowSums(obs_mat) > 0L
+  if (any(!keep)) {
+    message("Marginal likelihood: dropping ", sum(!keep),
+            " respondent(s) with no observed item (they contribute nothing).")
+  }
+  Yraw <- Yraw[keep, , drop = FALSE]
+  obs_mat <- obs_mat[keep, , drop = FALSE]
+
+  # Sort respondents by missingness pattern so each pattern is a contiguous
+  # block of rows.
+  key <- apply(obs_mat, 1L, function(r) paste0(as.integer(r), collapse = ""))
+  ord <- order(key)
+  Yraw <- Yraw[ord, , drop = FALSE]
+  obs_mat <- obs_mat[ord, , drop = FALSE]
+  key <- key[ord]
+
+  runs <- rle(key)
+  ends <- cumsum(runs$lengths)
+  starts <- ends - runs$lengths + 1L
+  n_pat <- length(runs$lengths)
+
+  items_by_pat <- lapply(starts, function(i) which(obs_mat[i, ]))
+  lens <- vapply(items_by_pat, length, integer(1))
+  pat_items <- unlist(items_by_pat, use.names = FALSE)
+  pat_i_start <- cumsum(c(1L, lens))[seq_len(n_pat)]
+
+  out <- sd
+  out$N <- nrow(Yraw)
+  # Missing entries are never read; zero-fill so Stan receives a finite matrix.
+  Yfill <- Yraw
+  Yfill[is.na(Yfill)] <- 0
+  out$Y <- Yfill
+  out$n_pat <- n_pat
+  out$pat_r_start <- as.integer(starts)
+  out$pat_r_end <- as.integer(ends)
+  out$pat_i_start <- as.integer(pat_i_start)
+  out$pat_i_len <- as.integer(lens)
+  out$n_pat_items <- length(pat_items)
+  out$pat_items <- as.integer(pat_items)
+  if (!is.null(sd$X)) out$X <- sd$X[keep, , drop = FALSE][ord, , drop = FALSE]
+
+  # The long-format entries the conditional program uses are not needed here.
+  for (nm in c("n_obs", "obs_row", "obs_col", "y_obs", "y_int", "eta_idx",
+               "grainsize", "n_cat", "max_cat", "Y_raw")) out[[nm]] <- NULL
+  attr(out, "marginal_rows") <- list(keep = keep, order = ord)
+  out
+}
+
 .dimsem_estimate_bayes <- function(spec, syntax, data, covariates = NULL,
                                    covariate_targets = "all",
                                    covariate_info = NULL,
@@ -3113,12 +3632,94 @@ if (has_cov && has_hyper) paste0(
             "applies).", call. = FALSE)
   }
 
-  if (gpu) {
+  # Hyper-disturbance parameterization switches (unity loadings only; under
+  # free loadings var(G) = 1 and both forms are the same program).
+  #
+  #   hyper_scale = "rho"    sample the implied within-block correlation on
+  #                          (0,1) and derive tau_g = sqrt(rho/(1-rho)),
+  #                          instead of sampling tau_g against a hard lower
+  #                          bound at zero. Moves the coordinate to logit(rho)
+  #                          and lets the prior (default beta(2, 8), density
+  #                          zero at both ends) keep mass off the degenerate
+  #                          point where the hyper factor vanishes.
+  #   hyper_param = "centered"  sample the disturbances on their own scale
+  #                          rather than as tau_g * std_normal. Preferred when
+  #                          the likelihood is informative about the
+  #                          disturbance relative to its prior; the default
+  #                          non-centered form is preferred when it is not.
+  #                          The two interact: centering tends to pay off only
+  #                          once rho has been moved away from zero, so test
+  #                          hyper_scale = "rho" first and add centering after.
+  hyper_scale <- match.arg(bayes_args$hyper_scale %||% "tau", c("tau", "rho"))
+  hyper_param <- match.arg(bayes_args$hyper_param %||% "noncentered",
+                           c("noncentered", "centered"))
+  if (identical(hyper_loadings, "free") &&
+      (identical(hyper_scale, "rho") || identical(hyper_param, "centered"))) {
+    warning("`hyper_scale` and `hyper_param` only affect the hyper-factor ",
+            "disturbance, which has no free scale under ",
+            "hyper_loadings = \"free\" (var(G) is fixed at 1). Both settings ",
+            "are ignored here.", call. = FALSE)
+  } else if (isTRUE(verbose) &&
+             (identical(hyper_scale, "rho") ||
+              identical(hyper_param, "centered"))) {
+    message("Hyper-disturbance parameterization: scale = ", hyper_scale,
+            ", form = ", hyper_param,
+            if (identical(hyper_scale, "rho"))
+              paste0(" (prior on rho: ",
+                     (bayes_args$priors %||% list())$rho_g %||% "beta(2, 8)",
+                     ")") else "",
+            ".")
+  }
+
+  # Marginalized program: integrates the latent disturbances out, so the
+  # hyper scale no longer multiplies an N-dimensional latent cloud. Normal
+  # likelihood only. GPU vectorization does not apply (the work is a Cholesky
+  # per missingness pattern, not one large vectorized lpdf), so the two are
+  # mutually exclusive.
+  marginal <- isTRUE(bayes_args$marginal)
+  if (marginal && !identical(likelihood, "normal")) {
+    stop("bayes_args$marginal = TRUE requires likelihood = \"normal\"; the ",
+         "ordinal model's latents cannot be integrated out in closed form.",
+         call. = FALSE)
+  }
+  if (marginal && gpu) {
+    stop("bayes_args$marginal and the GPU program are mutually exclusive.",
+         call. = FALSE)
+  }
+  if (marginal && isTRUE(verbose)) {
+    message("Likelihood: marginalized over the latent disturbances ",
+            "(one Cholesky per missingness pattern). Latent factor scores ",
+            "are not sampled under this program.")
+  }
+
+  if (marginal) {
+    stan_code <- .dimsem_stan_model_marginal(
+      n_hyper = length(spec$hyper_blocks),
+      n_cov = length(covariates %||% character(0)),
+      hyper_loadings = hyper_loadings,
+      hyper_scale = hyper_scale,
+      priors = bayes_args$priors %||% list()
+    )
+    stan_data <- .dimsem_stan_data(
+      spec, data, covariates = covariates,
+      covariate_targets = covariate_targets,
+      likelihood = likelihood, grainsize = bayes_args$grainsize,
+      hyper_loadings = hyper_loadings,
+      covariate_identification = covariate_identification,
+      covariate_info = covariate_info,
+      sign_ref = bayes_args$sign_ref
+    )
+    id_attr <- attr(stan_data, "identification")
+    stan_data <- .dimsem_stan_data_marginal(stan_data)
+    attr(stan_data, "identification") <- id_attr
+  } else if (gpu) {
     stan_code <- .dimsem_stan_model_gpu(
       likelihood = likelihood,
       n_hyper = length(spec$hyper_blocks),
       n_cov = length(covariates %||% character(0)),
       hyper_loadings = hyper_loadings,
+      hyper_scale = hyper_scale,
+      hyper_param = hyper_param,
       priors = bayes_args$priors %||% list()
     )
     stan_data <- .dimsem_stan_data(
@@ -3137,6 +3738,8 @@ if (has_cov && has_hyper) paste0(
       n_hyper = length(spec$hyper_blocks),
       n_cov = length(covariates %||% character(0)),
       hyper_loadings = hyper_loadings,
+      hyper_scale = hyper_scale,
+      hyper_param = hyper_param,
       priors = bayes_args$priors %||% list()
     )
     stan_data <- .dimsem_stan_data(
@@ -3357,17 +3960,24 @@ if (has_cov && has_hyper) paste0(
 .dimsem_stan_model_gpu <- function(likelihood = c("normal", "ordinal"),
                                    n_hyper = 0L, n_cov = 0L,
                                    hyper_loadings = "free",
+                                   hyper_scale = c("tau", "rho"),
+                                   hyper_param = c("noncentered", "centered"),
                                    priors = list()) {
   likelihood <- match.arg(likelihood)
+  hyper_scale <- match.arg(hyper_scale)
+  hyper_param <- match.arg(hyper_param)
   has_hyper <- n_hyper > 0L
   has_cov <- n_cov > 0L
   free_hyper <- has_hyper && identical(hyper_loadings, "free")
+  rho_scale <- has_hyper && !free_hyper && identical(hyper_scale, "rho")
+  centered  <- has_hyper && !free_hyper && identical(hyper_param, "centered")
 
   pr <- .dimsem_merge_args(list(
     lambda = "normal(0, 2)",
     nu = "normal(0, 5)",
     sigma = "student_t(3, 0, 2)",
     tau_g = "student_t(3, 0, 2)",
+    rho_g = "beta(2, 8)",
     delta = "normal(0, 2)",
     beta = "normal(0, 0.5)",
     beta_binary = "normal(0, 1)",
@@ -3429,11 +4039,18 @@ if (has_cov && has_hyper)
   vector<lower=0>[P] sigma;
   matrix[N, K] z_f;
 ",
-if (has_hyper)
+if (has_hyper && !centered)
 "  matrix[N, G] z_g;
 " else "",
-if (has_hyper && !free_hyper)
+if (centered)
+"  matrix[N, G] g_resid;                   // centered hyper disturbances
+" else "",
+if (has_hyper && !free_hyper && !rho_scale)
 "  vector<lower=0>[G] tau_g;
+" else "",
+if (rho_scale)
+"  vector<lower=0, upper=1>[G] rho_par;    // sampled on logit(rho); tau_g
+                                          // is derived (see CPU generator)
 " else "",
 if (free_hyper)
 "  vector[K] delta_un;                     // unconstrained hyper loadings
@@ -3458,6 +4075,9 @@ if (has_cov)
   // within fully targeted unity hyper-blocks; structural zeros for
   // untargeted factors) -- see .dimsem_beta_basis().
   matrix[Q, K] beta_f = beta_free * beta_basis;
+" else "",
+if (rho_scale)
+"  vector<lower=0>[G] tau_g = sqrt(rho_par ./ (1 - rho_par));
 " else "",
 if (free_hyper)
 "  vector[K] delta_l;
@@ -3502,7 +4122,8 @@ if (free_hyper && has_cov)
 if (has_hyper) paste0(
 "  for (g in 1:G) {
     g_score[, g] = ", if (has_cov) "X * beta_g[, g] + " else "",
-                     if (free_hyper) "z_g[, g];"
+                     if (centered) "g_resid[, g];"
+                     else if (free_hyper) "z_g[, g];"
                      else "tau_g[g] * z_g[, g];",
 "
   }
@@ -3557,10 +4178,17 @@ else "",
   sigma ~ ", pr$sigma, ";
   to_vector(z_f) ~ std_normal();
 ",
-if (has_hyper)
+if (has_hyper && !centered)
 "  to_vector(z_g) ~ std_normal();
 " else "",
-if (has_hyper && !free_hyper) paste0("  tau_g ~ ", pr$tau_g, ";
+if (centered)
+"  for (g in 1:G) {
+    g_resid[, g] ~ normal(0, tau_g[g]);
+  }
+" else "",
+if (rho_scale) paste0("  rho_par ~ ", pr$rho_g, ";
+") else "",
+if (has_hyper && !free_hyper && !rho_scale) paste0("  tau_g ~ ", pr$tau_g, ";
 ") else "",
 if (free_hyper) paste0("  delta_un ~ ", pr$delta, ";
 ") else "",

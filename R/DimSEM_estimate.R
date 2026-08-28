@@ -89,7 +89,8 @@
 #'   parallelism via `reduce_sum`; default 1), `opencl_ids` (e.g.
 #'   `c(0, 0)` to enable GPU acceleration via OpenCL), `iter_warmup`
 #'   (1000), `iter_sampling` (1000), `adapt_delta` (.9), `max_treedepth`,
-#'   `hyper_scale`, `hyper_param`, `marginal` (see Details),
+#'   `hyper_scale`, `hyper_param`, `marginal`, `anchor_signs`, `cfa_inits`
+#'   (see Details),
 #'   `init`, `step_size`, `refresh`,
 #'   `rho_floor` (.05; see Details), and `priors` (a named list overriding
 #'   any prior in the generated program). Regression coefficients default
@@ -186,6 +187,44 @@
 #' errors, as documented. With covariates present, the reported
 #' within-block correlation `rho_g` is conditional on the covariates, not
 #' the marginal correlation.
+#'
+#' \strong{Facet sign anchoring.} Under `hyper_loadings = "unity"` the
+#' cross-facet covariance is \eqn{\lambda_j \lambda_{j'} \tau^2}, so
+#' reflecting one facet's loadings while leaving its siblings alone predicts
+#' NEGATIVE correlations with them. That configuration is not an equivalent
+#' mirror mode -- unlike under free loadings, where the facet's hyper loading
+#' flips with it -- but a strictly worse-fitting local optimum, and the
+#' sampler cannot leave it because escaping requires every loading of a facet
+#' to cross zero at once. Its only remaining option is to drive \eqn{\tau^2}
+#' toward zero, producing a tight and badly biased hyper variance. With
+#' \eqn{K} facets only 2 of \eqn{2^K} random starting orientations are
+#' consistent, so this is the common case rather than the exception.
+#'
+#' `bayes_args$anchor_signs` therefore constrains each facet's reference
+#' loading to an orientation taken from the proposal's CFA inter-factor
+#' correlations (see [DimSEM_propose()]), which removes the spurious optima
+#' without discarding anything the likelihood distinguishes. `"auto"` (the
+#' default) enables it under unity loadings and disables it under free ones,
+#' where the reflections are genuine symmetries already handled by the sign
+#' relabeling; `TRUE` and `FALSE` force it. Only the \eqn{K} reference
+#' loadings are constrained -- non-reference loadings may legitimately be
+#' negative and are left free.
+#'
+#' Because unity loadings imply a non-negative correlation between every pair
+#' of facets, a facet the CFA orients opposite to the rest signals a
+#' misspecified block rather than a sign convention, and is reported with a
+#' warning. Note the hyper-structure test in [DimSEM_propose()] will not have
+#' flagged it, since its membership statistic is a sum of absolute
+#' correlations and is sign-agnostic.
+#'
+#' \strong{Starting values.} When the proposal carries a fitted CFA,
+#' starting values for the measurement block are derived from it unless
+#' `bayes_args$init` is supplied or `bayes_args$cfa_inits = FALSE`. The CFA
+#' is fitted on the ordinal metric while these programs use a normal
+#' likelihood on the raw scale, so standardized loadings are rescaled by each
+#' item's observed SD; \eqn{\tau} starts from the mean inter-factor
+#' correlation via \eqn{\tau^2 = \bar r/(1-\bar r)}. Starting values do not
+#' change the posterior, only how quickly chains reach it.
 #'
 #' \strong{Marginalized likelihood.} `bayes_args$marginal = TRUE` switches
 #' to a program that integrates the latent disturbances out analytically

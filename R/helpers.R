@@ -2092,6 +2092,10 @@
     hyper_blocks = hyper_blocks,
     hyper_source = hyper_source,
     source = proposal$selected$source,
+    # Carried through for sign orientation and starting values: the CFA the
+    # proposal already fitted tells us which facets are aligned with one
+    # another and gives usable starting values for the measurement block.
+    cfa = proposal$cfa,
     n = nrow(data)
   )
 }
@@ -2359,6 +2363,7 @@
                                hyper_loadings = "free",
                                hyper_scale = c("tau", "rho"),
                                hyper_param = c("noncentered", "centered"),
+                               anchored = FALSE,
                                priors = list()) {
   likelihood <- match.arg(likelihood)
   hyper_scale <- match.arg(hyper_scale)
@@ -2418,6 +2423,10 @@
   int<lower=1> K;                    // first-order factors
   array[P] int<lower=1, upper=K> item_factor;
   array[K] int<lower=1, upper=P> ref_item;   // sign-reference item per factor
+  vector[K] ref_sign;                       // +1/-1 orientation per facet
+  int<lower=0> P_free;                      // non-reference items
+  array[P] int<lower=1, upper=P> lam_pos;   // item -> slot in the anchored
+                                            // loading vector
   int<lower=0> n_obs;                // observed item entries (long format)
   array[n_obs] int<lower=1, upper=N> obs_row;
   array[n_obs] int<lower=1, upper=P> obs_col;
@@ -2460,11 +2469,21 @@
 
   params_block <- paste0(
     "parameters {
-  vector[P] lambda_un;                    // unconstrained; sign handled by
+",
+    if (anchored) "  // Sign-anchored measurement block. Only the K REFERENCE loadings are
+  // constrained, to the orientation fixed by ref_sign; every other loading
+  // stays unconstrained, because non-reference loadings can legitimately be
+  // negative. Deliberately narrower than constraining all P loadings, which
+  // conflates removing spurious mirror modes with forbidding negative
+  // loadings and mixes badly.
+  vector<lower=0>[K] lambda_ref;          // |loading| of each reference item
+  vector[P_free] lambda_oth;              // the rest, unconstrained
+" else "  vector[P] lambda_un;                    // unconstrained; sign handled by
                                           // in-iterations relabeling in the
                                           // generated quantities (blavaan
                                           // convention; Merkle et al., 2021)
-  vector[P] nu;                           // item intercepts
+",
+    "  vector[P] nu;                           // item intercepts
   vector<lower=0>[P] sigma;               // item residual scales
   matrix[N, K] z_f;                       // std-normal factor innovations
 ",
@@ -2509,6 +2528,14 @@
   transformed_block <- paste0(
     "transformed parameters {
 ",
+    if (anchored)
+      "  // Reassemble the loading vector from its anchored pieces. lam_pos maps
+  // each item to its slot in [ref_sign .* lambda_ref, lambda_oth], so this is
+  // ONE declare-and-define with no statements -- it therefore imposes no
+  // ordering constraint on the declarations that follow.
+  vector[P] lambda_un =
+    append_row(ref_sign .* lambda_ref, lambda_oth)[lam_pos];
+" else "",
     if (has_cov)
       "  // Covariate slopes assembled through the identification basis:
   // within any hyper-block whose hyper-factor and ALL children are
@@ -2612,8 +2639,9 @@
   model_block <- paste0(
     paste0("model {
   // Priors (weakly informative defaults; override via bayes_args$priors)
-  lambda_un ~ ", pr$lambda, ";
-  nu ~ ", pr$nu, ";
+", if (anchored)
+      paste0("  lambda_ref ~ ", pr$lambda, ";\n  lambda_oth ~ ", pr$lambda, ";\n")
+    else paste0("  lambda_un ~ ", pr$lambda, ";\n"), "  nu ~ ", pr$nu, ";
   sigma ~ ", pr$sigma, ";
   to_vector(z_f) ~ std_normal();
 "),
@@ -2864,6 +2892,7 @@ if (has_cov && has_hyper) paste0(
 .dimsem_stan_model_marginal <- function(n_hyper = 0L, n_cov = 0L,
                                         hyper_loadings = "free",
                                         hyper_scale = c("tau", "rho"),
+                                        anchored = FALSE,
                                         priors = list()) {
   hyper_scale <- match.arg(hyper_scale)
   has_hyper <- n_hyper > 0L
@@ -2886,6 +2915,10 @@ if (has_cov && has_hyper) paste0(
   matrix[N, P] Y;                          // missing entries unused
   array[P] int<lower=1, upper=K> item_factor;
   array[K] int<lower=1, upper=P> ref_item;  // sign-reference item per factor
+  vector[K] ref_sign;                       // +1/-1 orientation per facet
+  int<lower=0> P_free;                      // non-reference items
+  array[P] int<lower=1, upper=P> lam_pos;   // item -> slot in the anchored
+                                            // loading vector
   int<lower=1> n_pat;                      // missingness patterns
   array[n_pat] int<lower=1> pat_r_start;   // respondents sorted by pattern
   array[n_pat] int<lower=1> pat_r_end;
@@ -2919,8 +2952,18 @@ transformed data {
 }
 
 parameters {
-  vector[P] lambda_un;                     // sign fixed in generated quantities
-  vector[P] nu;
+",
+if (anchored) "  // Sign-anchored measurement block. Only the K REFERENCE loadings are
+  // constrained, to the orientation fixed by ref_sign; every other loading
+  // stays unconstrained, because non-reference loadings can legitimately be
+  // negative. Deliberately narrower than constraining all P loadings, which
+  // conflates removing spurious mirror modes with forbidding negative
+  // loadings and mixes badly.
+  vector<lower=0>[K] lambda_ref;          // |loading| of each reference item
+  vector[P_free] lambda_oth;              // the rest, unconstrained
+" else "  vector[P] lambda_un;                     // sign fixed in generated quantities
+",
+"  vector[P] nu;
   vector<lower=0>[P] sigma;
 ",
 if (has_hyper && !free_hyper && !rho_scale)
@@ -2942,6 +2985,14 @@ if (has_cov && has_hyper)
 
 transformed parameters {
 ",
+if (anchored)
+      "  // Reassemble the loading vector from its anchored pieces. lam_pos maps
+  // each item to its slot in [ref_sign .* lambda_ref, lambda_oth], so this is
+  // ONE declare-and-define with no statements -- it therefore imposes no
+  // ordering constraint on the declarations that follow.
+  vector[P] lambda_un =
+    append_row(ref_sign .* lambda_ref, lambda_oth)[lam_pos];
+" else "",
 if (rho_scale)
 "  vector<lower=0>[G] tau_g = sqrt(rho_par ./ (1 - rho_par));
 " else "",
@@ -3002,8 +3053,9 @@ if (has_hyper) paste0(
 "}
 
 model {
-  lambda_un ~ ", pr$lambda, ";
-  nu ~ ", pr$nu, ";
+", if (anchored)
+      paste0("  lambda_ref ~ ", pr$lambda, ";\n  lambda_oth ~ ", pr$lambda, ";\n")
+    else paste0("  lambda_un ~ ", pr$lambda, ";\n"), "  nu ~ ", pr$nu, ";
   sigma ~ ", pr$sigma, ";
 ",
 if (has_hyper && !free_hyper && !rho_scale) paste0("  tau_g ~ ", pr$tau_g, ";
@@ -3228,13 +3280,183 @@ if (has_cov && has_hyper) paste0(
   paste0(prog, gq_block)
 }
 
+# --- Facet orientation from the proposal CFA --------------------------------
+#
+# WHY THIS EXISTS. Under unity hyper loadings a per-facet reflection is NOT a
+# likelihood symmetry: the cross-facet covariance is lambda_j lambda_j' tau^2,
+# so flipping one facet's loadings alone predicts NEGATIVE correlations with
+# its siblings. The sampler cannot fix that by moving lambda (escaping needs
+# every loading of a facet to cross zero at once), so it instead drives tau^2
+# toward zero -- a genuine local optimum, tight and badly wrong. On
+# toy_simple_cov, whose true rho is 0.30, random starts left chains in mixed
+# sign modes and returned rho = 0.020 with ESS 12; starting all loadings
+# positive returned rho = 0.282 with ESS 3093. With K facets only 2 of 2^K
+# starting orientations are consistent, so the trap is the rule, not the
+# exception. (Under FREE loadings a lone reflection flips delta_k too and IS
+# a symmetry, which is why that mode never showed the problem.)
+#
+# WHAT THIS DOES. The proposal's CFA already estimates the inter-factor
+# correlations, so the relative orientations are known before sampling. Two
+# steps:
+#   (a) lavaan orients each factor by its MARKER item, DimSEM by its
+#       ref_item (the marginal hub). Re-express Psi in ref-item orientation
+#       first: o_k = sign of the CFA loading of DimSEM's ref item on factor k,
+#       and Psi*_jk = o_j o_k Psi_jk. Skipping this compares signs in two
+#       different conventions.
+#   (b) Only RELATIVE signs are determined -- flipping a whole block is a
+#       genuine symmetry -- so fix s_1 = +1 and choose the rest to maximize
+#       sum_{j<k} s_j s_k Psi*_jk. Exhaustive for K <= 12, leading eigenvector
+#       beyond.
+#
+# A negative sign is reported rather than silently applied: under unity every
+# implied facet correlation is tau^2/(tau^2+1) >= 0, so a facet genuinely
+# opposed to the rest is a MISSPECIFICATION, not bookkeeping. The
+# hyper-structure test will not have caught it either, since its Stage B
+# statistic is sum |r| and is sign-agnostic.
+.dimsem_ref_signs <- function(spec, item_names, ref_item, verbose = TRUE) {
+  K <- length(spec$latent_names)
+  if (K < 2L) return(rep(1, max(K, 1L)))
+
+  cfa <- spec$cfa
+  Psi <- if (!is.null(cfa)) cfa$factor_cor else NULL
+  if (is.null(Psi) || !is.matrix(Psi) || nrow(Psi) != K) {
+    if (isTRUE(verbose)) {
+      message("No usable CFA inter-factor correlation matrix in the ",
+              "proposal; facet orientations default to positive. Re-run ",
+              "DimSEM_propose(fit_cfa = TRUE) to derive them from the data.")
+    }
+    return(rep(1, K))
+  }
+  Psi <- as.matrix(Psi)
+  Psi[!is.finite(Psi)] <- 0
+
+  # (a) marker orientation -> ref-item orientation
+  o <- rep(1, K)
+  lam <- tryCatch(lavaan::lavInspect(cfa$fit, "std")$lambda,
+                  error = function(e) NULL)
+  if (!is.null(lam)) {
+    cn <- colnames(lam)
+    for (k in seq_len(K)) {
+      it <- item_names[ref_item[k]]
+      col <- if (!is.null(cn) && spec$latent_names[k] %in% cn) {
+        match(spec$latent_names[k], cn)
+      } else if (k <= ncol(lam)) k else NA_integer_
+      if (!is.na(col) && it %in% rownames(lam)) {
+        v <- lam[it, col]
+        if (is.finite(v) && v != 0) o[k] <- sign(v)
+      }
+    }
+  } else if (isTRUE(verbose)) {
+    message("Could not read standardized CFA loadings; assuming DimSEM's ",
+            "reference items share lavaan's marker orientation.")
+  }
+  Psi <- outer(o, o) * Psi
+
+  # (b) best relative orientation, anchored at s_1 = +1
+  obj <- function(sv) sum(outer(sv, sv) * Psi * upper.tri(Psi))
+  if (K <= 12L) {
+    best <- rep(1, K); best_val <- obj(best)
+    for (bits in seq_len(2^(K - 1L) - 1L)) {
+      sv <- c(1, ifelse(bitwAnd(bits, 2^(seq_len(K - 1L) - 1L)) > 0, -1, 1))
+      v <- obj(sv)
+      if (v > best_val) { best_val <- v; best <- sv }
+    }
+  } else {
+    ev <- eigen(Psi, symmetric = TRUE)$vectors[, 1]
+    best <- ifelse(ev < 0, -1, 1)
+    best <- best * best[1]
+  }
+
+  if (any(best < 0) && isTRUE(verbose)) {
+    warning("Facet(s) ",
+            paste(spec$latent_names[best < 0], collapse = ", "),
+            " are oriented OPPOSITE to the rest in the proposal CFA. They ",
+            "are anchored accordingly, but note that unity hyper loadings ",
+            "imply a NON-NEGATIVE correlation between every pair of facets, ",
+            "so a genuinely opposed facet indicates a misspecified block ",
+            "rather than a sign convention. Check the CFA's inter-factor ",
+            "correlations, and consider reverse-coding those items or ",
+            "excluding the facet from the block.", call. = FALSE)
+  }
+  as.numeric(best)
+}
+
+
+# --- Starting values from the proposal CFA ----------------------------------
+#
+# Chains that start in a poor configuration spend many more leapfrog steps per
+# iteration; a threefold spread in chain runtimes is the usual symptom. The
+# proposal's CFA supplies serviceable starting points for the whole
+# measurement block at no cost.
+#
+# Scale note: the CFA is fitted on the ordinal metric (WLSMV by default) while
+# these programs use a normal likelihood on the raw item scale, so the
+# STANDARDIZED loadings are rescaled by each item's observed SD rather than
+# transferred directly. Starting values do not affect the posterior, only how
+# quickly chains reach it, so approximate is fine -- but they must respect
+# every declared constraint or Stan rejects them.
+.dimsem_cfa_inits <- function(spec, sd, data, anchored, jitter = 0.15) {
+  items <- spec$item_names
+  Y <- as.matrix(data[, items, drop = FALSE])
+  item_sd <- apply(Y, 2L, stats::sd, na.rm = TRUE)
+  item_mu <- colMeans(Y, na.rm = TRUE)
+  item_sd[!is.finite(item_sd) | item_sd <= 0] <- 1
+
+  std_lam <- rep(0.6, length(items))
+  cfa <- spec$cfa
+  lam <- tryCatch(lavaan::lavInspect(cfa$fit, "std")$lambda,
+                  error = function(e) NULL)
+  if (!is.null(lam)) {
+    for (j in seq_along(items)) {
+      r <- match(items[j], rownames(lam))
+      if (!is.na(r)) {
+        v <- lam[r, ][which.max(abs(lam[r, ]))]
+        if (is.finite(v) && abs(v) > 0.05) std_lam[j] <- min(abs(v), 0.95)
+      }
+    }
+  }
+  ref_sign <- sd$ref_sign %||% rep(1, sd$K)
+  lam0 <- std_lam * item_sd * ref_sign[sd$item_factor]
+  sig0 <- pmax(item_sd * sqrt(pmax(1 - std_lam^2, 0.05)), 0.05)
+
+  # tau from the mean inter-factor correlation: rho = tau^2/(tau^2+1)
+  tau0 <- 0.6
+  Psi <- if (!is.null(cfa)) cfa$factor_cor else NULL
+  if (is.matrix(Psi) && nrow(Psi) > 1L) {
+    rbar <- mean(abs(Psi[upper.tri(Psi)]), na.rm = TRUE)
+    rbar <- min(max(rbar, 0.02), 0.9)
+    tau0 <- sqrt(rbar / (1 - rbar))
+  }
+
+  function() {
+    jit <- function(x, s = jitter) x * stats::rnorm(length(x), 1, s)
+    out <- list(nu = as.numeric(jit(item_mu)),
+                sigma = as.numeric(pmax(jit(sig0), 0.05)))
+    if (anchored) {
+      # |loading| of each reference item, and the rest unconstrained
+      out$lambda_ref <- as.numeric(pmax(jit(abs(lam0[sd$ref_item])), 0.05))
+      if (sd$P_free > 0L) {
+        out$lambda_oth <- as.numeric(jit(lam0[sd$nonref_item]))
+      }
+    } else {
+      out$lambda_un <- as.numeric(jit(lam0))
+    }
+    if (!is.null(sd$G) && sd$G > 0L) {
+      out$tau_g <- array(pmax(jit(rep(tau0, sd$G)), 0.05), dim = sd$G)
+      out$delta_un <- as.numeric(jit(rep(tau0, sd$K)))
+    }
+    out
+  }
+}
+
+
 .dimsem_stan_data <- function(spec, data, covariates = NULL,
                               covariate_targets = "all",
                               likelihood = "normal", grainsize = NULL,
                               hyper_loadings = "free",
                               covariate_identification = "sum_to_zero",
                               covariate_info = NULL,
-                              sign_ref = NULL) {
+                              sign_ref = NULL, verbose = TRUE) {
   items <- names(spec$partition)[!is.na(spec$partition)]
   part <- spec$partition[items]
   K <- length(unique(part))
@@ -3259,6 +3481,20 @@ if (has_cov && has_hyper) paste0(
     # the missingness pattern rather than the long observed-entry format.
     Y_raw = Y,
     item_factor = factor_index, ref_item = ref_item,
+    # Sign anchoring (see .dimsem_ref_signs): the reference loading of each
+    # facet is constrained to this sign, the others are left free.
+    ref_sign = .dimsem_ref_signs(spec, items, ref_item, verbose = verbose),
+    nonref_item = setdiff(seq_along(items), ref_item),
+    P_free = length(items) - K,
+    # Permutation used by the anchored parameterization: lam_pos[p] is item
+    # p's slot in c(ref_sign * lambda_ref, lambda_oth).
+    lam_pos = local({
+      nr <- setdiff(seq_along(items), ref_item)
+      lp <- integer(length(items))
+      lp[ref_item] <- seq_along(ref_item)
+      lp[nr] <- length(ref_item) + seq_along(nr)
+      lp
+    }),
     n_obs = nrow(obs), obs_row = unname(obs[, 1]),
     obs_col = unname(obs[, 2]), y_obs = unname(Y[obs]),
     grainsize = grainsize %||% max(1L, floor(nrow(obs) / 40L))
@@ -3650,6 +3886,18 @@ if (has_cov && has_hyper) paste0(
   #                          The two interact: centering tends to pay off only
   #                          once rho has been moved away from zero, so test
   #                          hyper_scale = "rho" first and add centering after.
+  # Sign anchoring. Under UNITY loadings a lone facet reflection is not a
+  # likelihood symmetry, so the mirror configurations are spurious local
+  # optima rather than equivalent modes -- anchoring each facet's reference
+  # loading deletes them without discarding anything real. Under FREE
+  # loadings the reflections ARE symmetries and the existing relabeling
+  # already handles them, so anchoring is off by default there.
+  anchored <- bayes_args$anchor_signs %||% "auto"
+  if (identical(anchored, "auto")) {
+    anchored <- identical(hyper_loadings, "unity")
+  }
+  anchored <- isTRUE(anchored)
+
   hyper_scale <- match.arg(bayes_args$hyper_scale %||% "tau", c("tau", "rho"))
   hyper_param <- match.arg(bayes_args$hyper_param %||% "noncentered",
                            c("noncentered", "centered"))
@@ -3686,6 +3934,13 @@ if (has_cov && has_hyper) paste0(
     stop("bayes_args$marginal and the GPU program are mutually exclusive.",
          call. = FALSE)
   }
+  if (anchored && isTRUE(verbose)) {
+    message("Sign anchoring: each facet's reference loading is constrained ",
+            "to the orientation implied by the proposal CFA. Under unity ",
+            "hyper loadings a lone facet reflection is not a symmetry, so ",
+            "the mirror configurations are spurious optima that trap chains ",
+            "at a near-zero hyper variance.")
+  }
   if (marginal && isTRUE(verbose)) {
     message("Likelihood: marginalized over the latent disturbances ",
             "(one Cholesky per missingness pattern). Latent factor scores ",
@@ -3698,6 +3953,7 @@ if (has_cov && has_hyper) paste0(
       n_cov = length(covariates %||% character(0)),
       hyper_loadings = hyper_loadings,
       hyper_scale = hyper_scale,
+      anchored = anchored,
       priors = bayes_args$priors %||% list()
     )
     stan_data <- .dimsem_stan_data(
@@ -3707,7 +3963,7 @@ if (has_cov && has_hyper) paste0(
       hyper_loadings = hyper_loadings,
       covariate_identification = covariate_identification,
       covariate_info = covariate_info,
-      sign_ref = bayes_args$sign_ref
+      sign_ref = bayes_args$sign_ref, verbose = verbose
     )
     id_attr <- attr(stan_data, "identification")
     stan_data <- .dimsem_stan_data_marginal(stan_data)
@@ -3720,6 +3976,7 @@ if (has_cov && has_hyper) paste0(
       hyper_loadings = hyper_loadings,
       hyper_scale = hyper_scale,
       hyper_param = hyper_param,
+      anchored = anchored,
       priors = bayes_args$priors %||% list()
     )
     stan_data <- .dimsem_stan_data(
@@ -3729,7 +3986,7 @@ if (has_cov && has_hyper) paste0(
       hyper_loadings = hyper_loadings,
       covariate_identification = covariate_identification,
       covariate_info = covariate_info,
-      sign_ref = bayes_args$sign_ref
+      sign_ref = bayes_args$sign_ref, verbose = verbose
     )
     stan_data <- .dimsem_stan_data_gpu(stan_data, likelihood = likelihood)
   } else {
@@ -3740,6 +3997,7 @@ if (has_cov && has_hyper) paste0(
       hyper_loadings = hyper_loadings,
       hyper_scale = hyper_scale,
       hyper_param = hyper_param,
+      anchored = anchored,
       priors = bayes_args$priors %||% list()
     )
     stan_data <- .dimsem_stan_data(
@@ -3749,7 +4007,7 @@ if (has_cov && has_hyper) paste0(
       hyper_loadings = hyper_loadings,
       covariate_identification = covariate_identification,
       covariate_info = covariate_info,
-      sign_ref = bayes_args$sign_ref
+      sign_ref = bayes_args$sign_ref, verbose = verbose
     )
   }
   # Covariate identification bookkeeping (see .dimsem_beta_basis()).
@@ -3863,7 +4121,28 @@ if (has_cov && has_hyper) paste0(
   if (!is.null(bayes_args$max_treedepth)) {
     sample_args$max_treedepth <- bayes_args$max_treedepth
   }
-  if (!is.null(bayes_args$init)) sample_args$init <- bayes_args$init
+  # Starting values. An explicit bayes_args$init always wins; otherwise use
+  # the proposal CFA when one is available. Inits never change the posterior,
+  # only how fast chains reach it -- and a poorly started chain burns far more
+  # leapfrog steps, which is what a several-fold spread in chain runtimes
+  # indicates.
+  if (!is.null(bayes_args$init)) {
+    sample_args$init <- bayes_args$init
+  } else if (!identical(bayes_args$cfa_inits, FALSE) &&
+             !is.null(spec$cfa) && !is.null(spec$cfa$fit)) {
+    sample_args$init <- tryCatch(
+      .dimsem_cfa_inits(spec, stan_data, data, anchored = anchored),
+      error = function(e) {
+        if (isTRUE(verbose)) {
+          message("Could not build CFA starting values (", conditionMessage(e),
+                  "); falling back to Stan's random inits.")
+        }
+        NULL
+      })
+    if (!is.null(sample_args$init) && isTRUE(verbose)) {
+      message("Starting values: derived from the proposal CFA.")
+    }
+  }
   if (!is.null(bayes_args$step_size)) sample_args$step_size <- bayes_args$step_size
   if (threads > 1L) sample_args$threads_per_chain <- threads
   if (!is.null(opencl_ids)) sample_args$opencl_ids <- opencl_ids
@@ -3962,6 +4241,7 @@ if (has_cov && has_hyper) paste0(
                                    hyper_loadings = "free",
                                    hyper_scale = c("tau", "rho"),
                                    hyper_param = c("noncentered", "centered"),
+                                   anchored = FALSE,
                                    priors = list()) {
   likelihood <- match.arg(likelihood)
   hyper_scale <- match.arg(hyper_scale)
@@ -3991,6 +4271,10 @@ if (has_cov && has_hyper) paste0(
   int<lower=1> K;
   array[P] int<lower=1, upper=K> item_factor;
   array[K] int<lower=1, upper=P> ref_item;   // sign-reference item per factor
+  vector[K] ref_sign;                       // +1/-1 orientation per facet
+  int<lower=0> P_free;                      // non-reference items
+  array[P] int<lower=1, upper=P> lam_pos;   // item -> slot in the anchored
+                                            // loading vector
   int<lower=0> n_obs;
   array[n_obs] int<lower=1, upper=N> obs_row;
   array[n_obs] int<lower=1, upper=P> obs_col;
@@ -4031,11 +4315,21 @@ if (has_cov && has_hyper)
 
   params_block <- paste0(
 "parameters {
-  vector[P] lambda_un;                    // unconstrained; sign handled by
+",
+    if (anchored) "  // Sign-anchored measurement block. Only the K REFERENCE loadings are
+  // constrained, to the orientation fixed by ref_sign; every other loading
+  // stays unconstrained, because non-reference loadings can legitimately be
+  // negative. Deliberately narrower than constraining all P loadings, which
+  // conflates removing spurious mirror modes with forbidding negative
+  // loadings and mixes badly.
+  vector<lower=0>[K] lambda_ref;          // |loading| of each reference item
+  vector[P_free] lambda_oth;              // the rest, unconstrained
+" else "  vector[P] lambda_un;                    // unconstrained; sign handled by
                                           // in-iterations relabeling in the
                                           // generated quantities (blavaan
                                           // convention; Merkle et al., 2021)
-  vector[P] nu;
+",
+    "  vector[P] nu;
   vector<lower=0>[P] sigma;
   matrix[N, K] z_f;
 ",
@@ -4070,6 +4364,14 @@ if (identical(likelihood, "ordinal"))
   transformed_block <- paste0(
 "transformed parameters {
 ",
+if (anchored)
+      "  // Reassemble the loading vector from its anchored pieces. lam_pos maps
+  // each item to its slot in [ref_sign .* lambda_ref, lambda_oth], so this is
+  // ONE declare-and-define with no statements -- it therefore imposes no
+  // ordering constraint on the declarations that follow.
+  vector[P] lambda_un =
+    append_row(ref_sign .* lambda_ref, lambda_oth)[lam_pos];
+" else "",
 if (has_cov)
 "  // Covariate slopes through the identification basis (sum-to-zero
   // within fully targeted unity hyper-blocks; structural zeros for
@@ -4173,8 +4475,9 @@ else "",
 
   model_block <- paste0(
 "model {
-  lambda_un ~ ", pr$lambda, ";
-  nu ~ ", pr$nu, ";
+", if (anchored)
+      paste0("  lambda_ref ~ ", pr$lambda, ";\n  lambda_oth ~ ", pr$lambda, ";\n")
+    else paste0("  lambda_un ~ ", pr$lambda, ";\n"), "  nu ~ ", pr$nu, ";
   sigma ~ ", pr$sigma, ";
   to_vector(z_f) ~ std_normal();
 ",

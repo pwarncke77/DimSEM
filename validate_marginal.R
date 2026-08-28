@@ -133,6 +133,66 @@ stopifnot(all(tab_miss$rhat[!is.na(tab_miss$rhat)] < 1.05))
 cat("SECTION 2 PASSED: multiple patterns, all rhat < 1.05.\n")
 
 
+fit_cond_u <- DimSEM_estimate(prop_toy, data = toy_simple_cov, covariates = "cov",
+                              covariate_targets = "all", engine = "bayes",
+                              hyper_loadings = "unity", covariate_identification = "sum_to_zero",
+                              bayes_args = toy_args, seed = 123)
+
+saveRDS(fit_cond_u, "fit_cond_u.rds")
+
+fit_cond_u_tab <- DimSEM_parameterEstimates(fit_cond_u)
+write.csv(fit_cond_u_tab, "fit_cond_u_tab.csv", row.names = FALSE)
+
+
+fit_marg_u <- DimSEM_estimate(prop_toy, data = toy_simple_cov, covariates = "cov",
+                              covariate_targets = "all", engine = "bayes",
+                              hyper_loadings = "unity", covariate_identification = "sum_to_zero",
+                              bayes_args = c(toy_args, list(marginal = TRUE, hyper_scale = "rho")), seed = 123)
+
+saveRDS(fit_marg_u, "fit_marg_u.rds")
+
+fit_marg_u_tab <- DimSEM_parameterEstimates(fit_marg_u)
+write.csv(fit_marg_u_tab, "fit_marg_u_tab.csv", row.names = FALSE)
+
+
+## refit the marginal arm with the SAME priors as the conditional arm
+fit_marg_u <- DimSEM_estimate(prop_toy, data = toy_simple_cov, covariates = "cov",
+                              covariate_targets = "all", engine = "bayes",
+                              hyper_loadings = "unity", covariate_identification = "sum_to_zero",
+                              bayes_args = c(toy_args, list(marginal = TRUE)), seed = 123)
+
+## 1. do the two programs agree? (this is the correctness test)
+cmp <- compare_fits(fit_cond_u, fit_marg_u, "conditional", "marginal")
+
+## 2. constraint check that works under BOTH loading modes
+con_check <- function(fit, lab = "") {
+  dr <- posterior::as_draws_matrix(fit$fit$draws("beta_f_cor"))
+  b  <- dr[, grep("^beta_f_cor\\[", colnames(dr)), drop = FALSE]
+  d  <- tryCatch({
+    dd <- posterior::as_draws_matrix(fit$fit$draws("delta"))
+    dd[, grep("^delta\\[", colnames(dd)), drop = FALSE]
+  }, error = function(e) matrix(1, nrow(b), ncol(b)))   # unity: delta == 1
+  cat(sprintf("%s max |sum(delta*beta)| = %.3e\n", lab, max(abs(rowSums(b * d)))))
+}
+con_check(fit_cond_u, "conditional:")
+con_check(fit_marg_u, "marginal:   ")
+
+## 3. did the pattern machinery engage, and what did it cost?
+cat("n_pat:", fit_marg_u$stan$data$n_pat,
+    " N:", fit_marg_u$stan$data$N, "\n")
+cat("elapsed  conditional:", round(fit_cond_u$timing$elapsed, 1),
+    " marginal:", round(fit_marg_u$timing$elapsed, 1), "\n")
+
+## 4. structural blocks side by side, against known truth
+print(fit_cond_u_tab[fit_cond_u_tab$op %in% c("~", ":=") |
+                       grepl("^rho", fit_cond_u_tab$lhs), ], row.names = FALSE, digits = 4)
+print(DimSEM_parameterEstimates(fit_marg_u)[
+  {t <- DimSEM_parameterEstimates(fit_marg_u);
+  t$op %in% c("~", ":=") | grepl("^rho", t$lhs)}, ],
+  row.names = FALSE, digits = 4)
+
+
+
 # =============================================================================
 # SECTION 3 -- FULL: 32 items, party_scale, unity loadings
 # =============================================================================
@@ -220,84 +280,140 @@ cat(sprintf("\ntotals: %s\nblavaan: 1.688 2.238 0.915 1.130\n",
 cat(sprintf("alpha = %.4f   mean(totals) = %.4f   (should match under sum-to-zero)\n",
             a, mean(tt)))
 
-# Sensitivity: rerun with tau_g = "gamma(1, 2)" and confirm rho barely moves.
-# With the funnel gone the likelihood should dominate, so a prior change that
-# previously mattered should now be close to inert.
+cat(fit_marg_u$stan$model_code)
+
+## 2. what the data actually say, to adjudicate 0.097 vs 0.012
+Y <- toy_simple_cov[, letters[1:12]]
+R <- cor(Y, use = "pairwise")
+cat("within-facet mean r:", round(mean(R[1:4,1:4][upper.tri(diag(4))]), 4), "\n")
+cat("cross-facet  mean r:", round(mean(R[1:4,5:8]), 4), "\n")
 
 
-# saveRDS(fit_marg32, "dimsem_32_party_unity_marginal.rds")
-# > tab32 <- DimSEM_parameterEstimates(fit_marg32)
-# > write.csv(tab32, "dimsem_32_party_unity_marginal.csv", row.names = FALSE)
+
+# Done in 24.4 s.
 # >
-#   > cat("\n--- FULL (marginal): structural block ---\n")
+#   > ## 1. do the two programs agree? (this is the correctness test)
+#   > cmp <- compare_fits(fit_cond_u, fit_marg_u, "conditional", "marginal")
 #
-# --- FULL (marginal): structural block ---
-#   > print(tab32[tab32$op %in% c("~", ":="), ], row.names = FALSE, digits = 4)
-# lhs op         rhs     est      se   ci.lower ci.upper  rhat ess_bulk ess_tail
-# F1  ~ party_scale  0.1907 0.07714  4.196e-02   0.3415 1.000  3021.17   4538.3
-# F2  ~ party_scale  0.6889 0.09575  5.092e-01   0.8864 1.005   106.03    508.8
-# F3  ~ party_scale -0.5680 0.09290 -7.514e-01  -0.3839 1.005   532.54   1131.8
-# F4  ~ party_scale -0.3116 0.08761 -4.880e-01  -0.1464 1.000   115.99   1325.4
-# G1  ~ party_scale  1.2991 0.13950  1.120e+00   1.5875 1.012    33.75    271.2
-# F1_total := party_scale  1.4897 0.16150  1.246e+00   1.8262 1.012    37.46    272.8
-# F2_total := party_scale  1.9880 0.20063  1.696e+00   2.4104 1.011    36.53    272.9
-# F3_total := party_scale  0.7311 0.16047  4.663e-01   1.0811 1.003    50.08    247.6
-# F4_total := party_scale  0.9875 0.13109  7.755e-01   1.2703 1.014    49.76    283.7
-# rho_G1 :=              0.1207 0.13813  3.840e-06   0.3450 1.021    26.21    237.4
+# --- conditional vs marginal: 45 shared parameters ---
+#   max |est difference|      : 0.1976
+# max |difference| / MCSE   : 4.6   (a few is fine; >10 is not)
+# ESS ratio marginal/cond   : median 17.6, min 1.8, max 4152.1
+# k    est_a    est_b      z
+# i ~~ i  0.43239  0.43889 -4.578
+# k ~~ k  0.57494  0.56975  4.232
+# c ~~ c  0.52641  0.53219 -4.087
+# e ~~ e  0.49735  0.50769 -3.194
+# f ~~ f  0.49591  0.48515  2.674
+# b ~~ b  0.46761  0.47049 -2.516
+# F3 ~ cov -0.01522 -0.01158 -2.417
+# b ~1   3.01847  3.02093 -1.616
 # >
-#   > cat("\nESS by block:\n")
-#
-# ESS by block:
-#   > for (o in c("=~", "~", "~~", "~1", ":=")) {
-#     +   s <- tab32[tab32$op == o & !is.na(tab32$ess_bulk), ]
-#     +   if (nrow(s)) cat(sprintf("  %-3s n=%3d  ess %7.0f - %8.0f   max rhat %.4f\n",
-#                                  +                            o, nrow(s), min(s$ess_bulk), max(s$ess_bulk),
-#                                  +                            max(s$rhat)))
+#   > ## 2. constraint check that works under BOTH loading modes
+#   > con_check <- function(fit, lab = "") {
+#     +   dr <- posterior::as_draws_matrix(fit$fit$draws("beta_f_cor"))
+#     +   b  <- dr[, grep("^beta_f_cor\\[", colnames(dr)), drop = FALSE]
+#     +   d  <- tryCatch({
+#       +     dd <- posterior::as_draws_matrix(fit$fit$draws("delta"))
+#       +     dd[, grep("^delta\\[", colnames(dd)), drop = FALSE]
+#       +   }, error = function(e) matrix(1, nrow(b), ncol(b)))   # unity: delta == 1
+#     +   cat(sprintf("%s max |sum(delta*beta)| = %.3e\n", lab, max(abs(rowSums(b * d)))))
 #     + }
-# =~  n= 32  ess      32 -      144   max rhat 1.0214
-# ~   n=  5  ess      34 -     3021   max rhat 1.0116
-# ~~  n= 33  ess      26 -    10631   max rhat 1.0215
-# ~1  n= 32  ess     126 -     4810   max rhat 1.0030
-# :=  n=  5  ess      26 -       50   max rhat 1.0215
+# > con_check(fit_cond_u, "conditional:")
+# conditional: max |sum(delta*beta)| = 1.000e-08
+# > con_check(fit_marg_u, "marginal:   ")
+# marginal:    max |sum(delta*beta)| = 1.000e-08
 # >
-#   > # ---------------------------------------------------------------------------
-# > # TARGETS from the blavaan reference fit (same model, same metric, and a
-#   > # marginalized likelihood, which is why it sampled cleanly):
-#   > #
-#   > #   rho_G1   ~ 0.319  [0.283, 0.355]      NOT the 0.101 the conditional
-#   > #                                          program reported
-#   > #   totals   ~ 1.688 / 2.238 / 0.915 / 1.130   (match by size, not by label)
-#   > #   alpha    ~ mean(totals) ~ 1.493       (sum-to-zero; blavaan's own 1.194 is
-#   > #                                          its prior-anchored split, so it is
-#   > #                                          NOT the comparison target)
-#   > #   ESS      in the thousands, rhat ~ 1.00
-#   > #
-#   > # If rho lands near 0.32 with high ESS, marginalization is correct and the
-#   > # bias is gone. If it lands near 0.10 WITH high ESS, the implementation
-#   > # disagrees with blavaan on the model, not just on the sampling -- stop and
-#   > # investigate before using anything.
-#   > # ---------------------------------------------------------------------------
-# > rho <- tab32[grepl("^rho", tab32$lhs), ]
-# > if (nrow(rho)) {
-#   +   cat(sprintf("\nrho_G1 = %.4f [%.4f, %.4f]   ess %.0f   rhat %.4f\n",
-#                   +               rho$est[1], rho$ci.lower[1], rho$ci.upper[1],
-#                   +               rho$ess_bulk[1], rho$rhat[1]))
-#   +   cat("blavaan reference: 0.3186 [0.2827, 0.3547], ess 3576, rhat 1.000\n")
-#   + }
-#
-# rho_G1 = 0.1207 [0.0000, 0.3450]   ess 26   rhat 1.0215
-# blavaan reference: 0.3186 [0.2827, 0.3547], ess 3576, rhat 1.000
-# > tt <- tab32$est[tab32$op == ":=" & grepl("_total$", tab32$lhs)]
-# > a  <- tab32$est[tab32$op == "~" & grepl("^G", tab32$lhs)]
-# > cat(sprintf("\ntotals: %s\nblavaan: 1.688 2.238 0.915 1.130\n",
-#               +             paste(sprintf("%.3f", sort(tt, decreasing = TRUE)), collapse = " ")))
-#
-# totals: 1.988 1.490 0.987 0.731
-# blavaan: 1.688 2.238 0.915 1.130
-# > cat(sprintf("alpha = %.4f   mean(totals) = %.4f   (should match under sum-to-zero)\n",
-#               +             a, mean(tt)))
-# alpha = 1.2991   mean(totals) = 1.2991   (should match under sum-to-zero)
+#   > ## 3. did the pattern machinery engage, and what did it cost?
+#   > cat("n_pat:", fit_marg_u$stan$data$n_pat,
+#         +     " N:", fit_marg_u$stan$data$N, "\n")
+# n_pat: 1  N: 400
+# > cat("elapsed  conditional:", round(fit_cond_u$timing$elapsed, 1),
+#       +     " marginal:", round(fit_marg_u$timing$elapsed, 1), "\n")
+# elapsed  conditional: 37.4  marginal: 24.4
 # >
-#   > # Sensitivity: rerun with tau_g = "gamma(1, 2)" and confirm rho barely moves.
-#   > # With the funnel gone the likelihood should dominate, so a prior change that
-#   > # previously mattered should now be close to inert
+#   > ## 4. structural blocks side by side, against known truth
+#   > print(fit_cond_u_tab[fit_cond_u_tab$op %in% c("~", ":=") |
+#                            +                        grepl("^rho", fit_cond_u_tab$lhs), ], row.names = FALSE, digits = 4)
+# lhs op rhs      est      se   ci.lower ci.upper  rhat ess_bulk ess_tail
+# F1  ~ cov  0.18201 0.05260  8.112e-02  0.28816 1.088    8.955   105.00
+# F2  ~ cov -0.16679 0.05160 -2.676e-01 -0.06677 1.081   10.974   134.70
+# F3  ~ cov -0.01522 0.05037 -1.133e-01  0.08580 1.002 1408.718  2309.78
+# G1  ~ cov  0.40055 0.05343  3.090e-01  0.51228 1.455    1.993    16.72
+# F1_total := cov  0.58256 0.08279  4.353e-01  0.75769 1.406    2.123    16.40
+# F2_total := cov  0.23376 0.06613  1.102e-01  0.36778 1.077   11.748   134.46
+# F3_total := cov  0.38532 0.07282  2.499e-01  0.53372 1.209    3.706    19.69
+# rho_G1 :=      0.14553 0.14116  2.104e-05  0.35192 2.123    1.317    18.46
+# > print(DimSEM_parameterEstimates(fit_marg_u)[
+#   +   {t <- DimSEM_parameterEstimates(fit_marg_u);
+#   +   t$op %in% c("~", ":=") | grepl("^rho", t$lhs)}, ],
+#   +   row.names = FALSE, digits = 4)
+# lhs op rhs       est       se   ci.lower ci.upper   rhat ess_bulk ess_tail
+# F1  ~ cov  0.164204 0.048908  7.055e-02  0.26260 1.0001   5671.7     3071
+# F2  ~ cov -0.152625 0.048343 -2.480e-01 -0.05845 1.0000   5905.0     3046
+# F3  ~ cov -0.011579 0.050176 -1.109e-01  0.08515 1.0008   5366.4     2890
+# G1  ~ cov  0.367681 0.034508  2.993e-01  0.43637 1.0001   5952.7     3180
+# F1_total := cov  0.531886 0.062129  4.140e-01  0.65666 1.0000   5214.0     2852
+# F2_total := cov  0.215056 0.057197  1.039e-01  0.32392 0.9999   6818.0     3078
+# F3_total := cov  0.356102 0.060725  2.371e-01  0.47761 1.0004   5698.7     3017
+# rho_G1 :=      0.006313 0.008535  9.070e-06  0.03038 1.0147    483.1     2068
+#
+
+
+## A. Are the chains in different sign modes? (30 seconds, no refit)
+m  <- posterior::as_draws_matrix(fit_marg_u$fit$draws("lambda_un"))
+ch <- posterior::as_draws_df(fit_marg_u$fit$draws("lambda_un"))$.chain
+fac <- rep(1:3, each = 4)
+for (k in 1:3)
+  cat("facet", k, "mean loading sign by chain:",
+      round(tapply(rowMeans(m[, fac == k, drop = FALSE]), ch, function(x) mean(sign(x))), 2), "\n")
+
+## B. Start every loading positive and see if rho moves to ~0.35
+init_pos <- function() list(lambda_un = rep(0.6, 12), tau_g = array(0.6, 1))
+fit_fix <- DimSEM_estimate(prop_toy, data = toy_simple_cov, covariates = "cov",
+                           covariate_targets = "all", engine = "bayes",
+                           hyper_loadings = "unity", covariate_identification = "sum_to_zero",
+                           bayes_args = c(toy_args, list(marginal = TRUE, init = init_pos)), seed = 123)
+DimSEM_parameterEstimates(fit_fix)[c("lhs","op","rhs","est","rhat","ess_bulk")] |>
+  subset(grepl("^rho|^G1", lhs))
+
+
+
+
+# > ## A. Are the chains in different sign modes? (30 seconds, no refit)
+#   > m  <- posterior::as_draws_matrix(fit_marg_u$fit$draws("lambda_un"))
+# > ch <- posterior::as_draws_df(fit_marg_u$fit$draws("lambda_un"))$.chain
+# > fac <- rep(1:3, each = 4)
+# > for (k in 1:3)
+#   +   cat("facet", k, "mean loading sign by chain:",
+#           +       round(tapply(rowMeans(m[, fac == k, drop = FALSE]), ch, function(x) mean(sign(x))), 2), "\n")
+# facet 1 mean loading sign by chain: 1 1
+# facet 2 mean loading sign by chain: -1 1
+# facet 3 mean loading sign by chain: 1 -1
+# >
+#   > ## B. Start every loading positive and see if rho moves to ~0.35
+#   > init_pos <- function() list(lambda_un = rep(0.6, 12), tau_g = array(0.6, 1))
+# > fit_fix <- DimSEM_estimate(prop_toy, data = toy_simple_cov, covariates = "cov",
+#                              +                            covariate_targets = "all", engine = "bayes",
+#                              +                            hyper_loadings = "unity", covariate_identification = "sum_to_zero",
+#                              +                            bayes_args = c(toy_args, list(marginal = TRUE, init = init_pos)), seed = 123)
+#
+# Both chains finished successfully.
+# Mean chain execution time: 4.4 seconds.
+# Total execution time: 5.0 seconds.
+#
+# |=======================================================================================================================================================================| 100%
+# Done in 5.7 s.
+# > DimSEM_parameterEstimates(fit_fix)[c("lhs","op","rhs","est","rhat","ess_bulk")] |>
+#   +   subset(grepl("^rho|^G1", lhs))
+# lhs op rhs       est      rhat ess_bulk
+# 13     G1 =~  F1 1.0000000        NA       NA
+# 14     G1 =~  F2 1.0000000        NA       NA
+# 15     G1 =~  F3 1.0000000        NA       NA
+# 43     G1 ~~  G1 0.3975517 0.9998905 3093.204
+# 47     G1  ~ cov 0.4335106 1.0014184 5107.892
+# 51 rho_G1 :=     0.2820611 0.9998905 3093.204
+
+## 1. Is marginalization even necessary, or was the sign trap the whole story?
+
+

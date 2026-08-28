@@ -300,9 +300,17 @@ lemma, at \eqn{O(P_{obs} R^2)} per missingness pattern rather than
 its respondents. No latent cloud survives and the hyper scale becomes an
 ordinary smooth parameter inside a covariance matrix.
 
+This is enabled BY DEFAULT for \code{hyper_loadings = "unity"} together with
+\code{covariate_identification = "sum_to_zero"} under the normal likelihood and
+off the GPU path -- the configuration in which the conditional program's
+funnel bites hardest. \code{bayes_args$marginal = FALSE} restores the
+conditional program (which also samples the latent factor scores);
+\code{TRUE} forces marginalization and errors where it cannot apply.
+
 Restrictions: normal likelihood only (ordinal latents cannot be
 integrated out in closed form), mutually exclusive with the GPU program
-(the work is a Cholesky per pattern, not one large vectorized density),
+(the work is a Cholesky per missingness pattern rather than one large
+vectorized density, so OpenCL dispatch overhead would dominate),
 and latent factor scores are not sampled. Identification, the sum-to-zero
 machinery and the sign relabeling are all unchanged -- marginalization
 alters only how the likelihood is evaluated, not the model.

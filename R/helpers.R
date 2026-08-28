@@ -3441,6 +3441,12 @@ if (has_cov && has_hyper) paste0(
     } else {
       out$lambda_un <- as.numeric(jit(lam0))
     }
+    if (!is.null(sd$K_free) && sd$K_free > 0L && !is.null(sd$Q)) {
+      # Covariate coefficients start at zero: no prior information, and
+      # leaving them unset makes cmdstanr emit a per-chain notice.
+      out$beta_free <- matrix(0, sd$Q, sd$K_free)
+      if (!is.null(sd$G) && sd$G > 0L) out$beta_g <- matrix(0, sd$Q, sd$G)
+    }
     if (!is.null(sd$G) && sd$G > 0L) {
       out$tau_g <- array(pmax(jit(rep(tau0, sd$G)), 0.05), dim = sd$G)
       out$delta_un <- as.numeric(jit(rep(tau0, sd$K)))
@@ -3924,7 +3930,45 @@ if (has_cov && has_hyper) paste0(
   # likelihood only. GPU vectorization does not apply (the work is a Cholesky
   # per missingness pattern, not one large vectorized lpdf), so the two are
   # mutually exclusive.
-  marginal <- isTRUE(bayes_args$marginal)
+  # Marginalization defaults ON for the configuration where it is both
+  # applicable and necessary: unity hyper loadings with the sum-to-zero
+  # constraint, under the normal likelihood, off the GPU path. That is the
+  # combination in which the conditional program's tau <-> latent-cloud
+  # funnel bites hardest -- on the ANES battery it held bulk ESS for the
+  # hyper variance at ~20-35 and biased it downward, while the marginalized
+  # program returned ESS ~4800 and an estimate matching an independent
+  # blavaan fit. Under FREE loadings the funnel does not arise (there is no
+  # free hyper variance to be trapped), so the default there stays off and
+  # the conditional program keeps its latent scores and its ordinal path.
+  #
+  # `auto` is only a default: an explicit TRUE/FALSE always wins, and an
+  # explicit TRUE still errors where marginalization cannot apply.
+  marginal_req <- bayes_args$marginal %||% "auto"
+  auto_marginal <- identical(marginal_req, "auto")
+  if (auto_marginal) {
+    marginal <- identical(hyper_loadings, "unity") &&
+      identical(covariate_identification, "sum_to_zero") &&
+      identical(likelihood, "normal") && !gpu
+    if (marginal && isTRUE(verbose)) {
+      message("Marginalized likelihood enabled by default for ",
+              "hyper_loadings = \"unity\" with ",
+              "covariate_identification = \"sum_to_zero\". Pass ",
+              "bayes_args$marginal = FALSE to use the conditional program ",
+              "(which also samples the latent factor scores).")
+    }
+    if (!marginal && identical(hyper_loadings, "unity") &&
+        identical(covariate_identification, "sum_to_zero") &&
+        isTRUE(verbose)) {
+      message("Marginalization would normally be enabled for this ",
+              "configuration but does not apply here (",
+              if (!identical(likelihood, "normal"))
+                "ordinal likelihood" else "GPU program",
+              "); using the conditional program. Expect the hyper variance ",
+              "to mix poorly -- check its ESS before interpreting it.")
+    }
+  } else {
+    marginal <- isTRUE(marginal_req)
+  }
   if (marginal && !identical(likelihood, "normal")) {
     stop("bayes_args$marginal = TRUE requires likelihood = \"normal\"; the ",
          "ordinal model's latents cannot be integrated out in closed form.",

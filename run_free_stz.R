@@ -293,20 +293,20 @@ if (exists("DimSEM_ridgeReport")) {
     delta  = "normal(0, 2)", beta = "normal(0, 0.5)"
   )
 
-  # fit_wstz <- DimSEM_estimate(
-  #   prop32, data = dat_ds,
-  #   covariates = "income_scale", covariate_targets = "all",
-  #   engine = "bayes",
-  #   hyper_loadings = "free",
-  #   covariate_identification = "sum_to_zero",
-  #   standardize_covariates = FALSE,
-  #   bayes_args = list(
-  #     chains = 16L, parallel_chains = 16L,
-  #     iter_warmup = 800L, iter_sampling = 400L,
-  #     adapt_delta = 0.9, max_treedepth = 20L,
-  #     likelihood = "normal", priors = blav_priors),
-  #   seed = 123
-  # )
+  fit_wstz <- DimSEM_estimate(
+    prop32, data = dat_ds,
+    covariates = "income_scale", covariate_targets = "all",
+    engine = "bayes",
+    hyper_loadings = "free",
+    covariate_identification = "sum_to_zero",
+    standardize_covariates = FALSE,
+    bayes_args = list(
+      chains = 16L, parallel_chains = 16L,
+      iter_warmup = 800L, iter_sampling = 400L,
+      adapt_delta = 0.9, max_treedepth = 20L,
+      likelihood = "normal", priors = blav_priors),
+    seed = 123
+  )
   #
   # saveRDS(fit_wstz, "dimsem_32_income_free_stz.rds")
   fit_wstz <- readRDS("dimsem_32_income_free_stz.rds")

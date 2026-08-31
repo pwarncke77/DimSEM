@@ -5162,16 +5162,50 @@ print.DimSEM_posterior <- function(x, ...) {
 #' the likelihood identifies. Under unity loadings `rho_<block>` is already
 #' a correlation and is therefore identical under every standardization.
 #'
+#' @section Posterior draws:
+#' `return = "draws"` returns the posterior draws themselves rather than a
+#' summary, in the manner of [blavaan::standardizedPosterior()]: a data frame
+#' of draws (rows) by parameters (columns), with columns named in the
+#' lavaan convention -- `"F1=~it3"`, `"F1~cov"`, `"it3~~it3"`, `"it3~1"`.
+#' `standardize` applies exactly as it does to the summary, so the draws are
+#' raw, `std.lv`- or `std.all`-scaled on request.
+#'
+#' The columns correspond one-to-one, and in order, to the rows of the
+#' summary table for the same arguments -- which makes the two views
+#' interchangeable and lets any further quantity be derived draw-wise.
+#' Parameters FIXED by the model (unity hyper loadings, unit facet
+#' disturbances) appear as constant columns rather than being dropped, so
+#' that correspondence holds; note they become genuine varying quantities
+#' once `standardize` is not `"none"`. Draws are ordered
+#' iteration-within-chain, as in [posterior::as_draws_matrix()], and the
+#' chain and iteration indices are attached as attributes rather than added
+#' as columns. `return = "draws"` requires `engine = "bayes"`.
+#'
 #' @param object A `"DimSEM_estimate"` object.
 #' @param prob Central interval mass (default .95).
 #' @param standardize One of `"none"`, `"std.lv"`, `"std.all"`; see
-#'   Standardization.
-#' @return A data frame in lavaan `parameterEstimates()` layout.
+#'   Standardization. A logical is also accepted, `FALSE` meaning `"none"`
+#'   and `TRUE` meaning `"std.all"`.
+#' @param return `"summary"` (default) for the parameter table, or
+#'   `"draws"` for the posterior draws; see Posterior draws.
+#' @return A data frame: the parameter table under `return = "summary"`,
+#'   or draws-by-parameters under `return = "draws"`.
 #' @export
 DimSEM_parameterEstimates <- function(object, prob = 0.95,
                                       standardize = c("none", "std.lv",
-                                                      "std.all")) {
-  standardize <- match.arg(standardize)
+                                                      "std.all"),
+                                      return = c("summary", "draws")) {
+  # `standardize` also accepts a logical for convenience: FALSE is "none",
+  # TRUE is "std.all".
+  if (is.logical(standardize) && length(standardize) == 1L) {
+    standardize <- if (isTRUE(standardize)) "std.all" else "none"
+  }
+  standardize <- match.arg(standardize, c("none", "std.lv", "std.all"))
+  # `return` is a legal argument name but shadows base::return(). R resolves
+  # a call in function position by skipping non-function bindings, so this
+  # would work either way -- but relying on that is needless, so the value is
+  # copied to a local and `return` is never read again.
+  ret <- match.arg(return)
   if (!inherits(object, "DimSEM_estimate")) {
     stop("`object` must be a DimSEM_estimate object.", call. = FALSE)
   }
@@ -5184,6 +5218,12 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
   # rather than reimplement them. The returned layout matches the Bayesian
   # table (rhat/ESS are NA, which is what they mean for a point estimate).
   if (!identical(object$engine, "bayes")) {
+    if (identical(ret, "draws")) {
+      stop("return = \"draws\" needs a posterior; this fit used ",
+           "engine = \"", object$engine, "\", which yields point estimates. ",
+           "Use return = \"summary\", or refit with engine = \"bayes\".",
+           call. = FALSE)
+    }
     .dimsem_require_namespace("lavaan")
     tb <- if (identical(standardize, "none")) {
       pe <- lavaan::parameterEstimates(object$fit, level = prob)
@@ -5209,17 +5249,22 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
   unity <- identical(map$hyper_loadings, "unity")
   qs <- c((1 - prob) / 2, 1 - (1 - prob) / 2)
 
-  summarize_var <- function(a) {
+  # Rows are accumulated as DRAWS and only summarized at the end, so that
+  # `return = "draws"` and `return = "summary"` describe exactly the same set
+  # of quantities -- one column per summary row, in the same order.
+  dr <- function(a) {
     # `a` may arrive as a draws_array (unstandardized) or as a plain base
     # array (standardized); as_draws_array() accepts both.
-    a <- posterior::as_draws_array(a)
+    posterior::as_draws_array(a)
+  }
+  summarize_var <- function(a) {
     m <- as.numeric(a)
     c(est = mean(m), se = stats::sd(m),
       ci.lower = unname(stats::quantile(m, qs[1])),
       ci.upper = unname(stats::quantile(m, qs[2])),
-      rhat = posterior::rhat(posterior::as_draws_array(a)),
-      ess_bulk = posterior::ess_bulk(posterior::as_draws_array(a)),
-      ess_tail = posterior::ess_tail(posterior::as_draws_array(a)))
+      rhat = posterior::rhat(a),
+      ess_bulk = posterior::ess_bulk(a),
+      ess_tail = posterior::ess_tail(a))
   }
   grab <- function(vars) {
     d <- tryCatch(object$fit$draws(variables = vars),
@@ -5268,22 +5313,20 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
   }
 
   rows <- list()
-  add <- function(lhs, op, rhs, stats_row) {
-    rows[[length(rows) + 1]] <<- data.frame(
-      lhs = lhs, op = op, rhs = rhs, t(stats_row),
-      stringsAsFactors = FALSE)
+  add <- function(lhs, op, rhs, draws) {
+    rows[[length(rows) + 1]] <<- list(lhs = lhs, op = op, rhs = rhs,
+                                      draws = draws, value = NULL)
   }
   add_fixed <- function(lhs, op, rhs, value) {
-    add(lhs, op, rhs, c(est = value, se = 0, ci.lower = value,
-                        ci.upper = value, rhat = NA_real_,
-                        ess_bulk = NA_real_, ess_tail = NA_real_))
+    rows[[length(rows) + 1]] <<- list(lhs = lhs, op = op, rhs = rhs,
+                                      draws = NULL, value = value)
   }
 
   lam <- grab("lambda")
   if (!is.null(lam)) {
     for (i in seq_along(map$items)) {
       add(paste0("F", part[map$items[i]]), "=~", map$items[i],
-          summarize_var(s_lam(lam[, , i, drop = FALSE], i)))
+          dr(s_lam(lam[, , i, drop = FALSE], i)))
     }
   }
   if (length(blocks) > 0) {
@@ -5296,7 +5339,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
             add_fixed(g, "=~", fk, 1)
           } else {
             add(g, "=~", fk,
-                summarize_var(s_delta(array(1, dim(SC$sd_eta[, , k,
+                dr(s_delta(array(1, dim(SC$sd_eta[, , k,
                                                              drop = FALSE])),
                                       k, gi)))
           }
@@ -5310,7 +5353,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
             k <- match(fk, map$factors)
             gi <- match(g, names(blocks))
             add(g, "=~", fk,
-                summarize_var(s_delta(ds[, , k, drop = FALSE], k, gi)))
+                dr(s_delta(ds[, , k, drop = FALSE], k, gi)))
           }
         }
       }
@@ -5320,7 +5363,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
   if (!is.null(nu)) {
     for (i in seq_along(map$items)) {
       add(map$items[i], "~1", "",
-          summarize_var(s_nu(nu[, , i, drop = FALSE], i)))
+          dr(s_nu(nu[, , i, drop = FALSE], i)))
     }
   }
   # Residual VARIANCES: sigma^2 transformed draw-wise (lavaan-canonical).
@@ -5328,7 +5371,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
   if (!is.null(sig)) {
     for (i in seq_along(map$items)) {
       add(map$items[i], "~~", map$items[i],
-          summarize_var(s_sig2(sig[, , i, drop = FALSE]^2, i)))
+          dr(s_sig2(sig[, , i, drop = FALSE]^2, i)))
     }
   }
   for (ki in seq_along(map$factors)) {
@@ -5336,7 +5379,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
       add_fixed(map$factors[ki], "~~", map$factors[ki], 1)
     } else {
       add(map$factors[ki], "~~", map$factors[ki],
-          summarize_var(s_psi_eta(ki)))
+          dr(s_psi_eta(ki)))
     }
   }
   if (length(blocks) > 0) {
@@ -5345,7 +5388,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
       if (!is.null(tg)) {
         for (gi in seq_along(names(blocks))) {
           add(names(blocks)[gi], "~~", names(blocks)[gi],
-              summarize_var(s_psi_G(tg[, , gi, drop = FALSE]^2, gi)))
+              dr(s_psi_G(tg[, , gi, drop = FALSE]^2, gi)))
         }
       }
     } else {
@@ -5354,7 +5397,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
           add_fixed(names(blocks)[gi], "~~", names(blocks)[gi], 1)
         } else {
           add(names(blocks)[gi], "~~", names(blocks)[gi],
-              summarize_var(s_psi_G(array(1, dim(SC$var_G[, , gi,
+              dr(s_psi_G(array(1, dim(SC$var_G[, , gi,
                                                           drop = FALSE])), gi)))
         }
       }
@@ -5369,7 +5412,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
                        dimnames(bf)[[3]])
           if (!is.na(idx)) {
             add(map$factors[k], "~", map$covariates[q],
-                summarize_var(s_beta(bf[, , idx, drop = FALSE], q, k)))
+                dr(s_beta(bf[, , idx, drop = FALSE], q, k)))
           }
         }
       }
@@ -5383,7 +5426,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
                          dimnames(bg)[[3]])
             if (!is.na(idx)) {
               add(names(blocks)[gi], "~", map$covariates[q],
-                  summarize_var(s_beta(bg[, , idx, drop = FALSE], q, gi,
+                  dr(s_beta(bg[, , idx, drop = FALSE], q, gi,
                                        on_G = TRUE)))
             }
           }
@@ -5405,7 +5448,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
                        dimnames(bt)[[3]])
           if (!is.na(idx)) {
             add(paste0(map$factors[ki], "_total"), ":=", map$covariates[q],
-                summarize_var(s_beta(bt[, , idx, drop = FALSE], q, ki)))
+                dr(s_beta(bt[, , idx, drop = FALSE], q, ki)))
           }
         }
       }
@@ -5418,12 +5461,60 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
       # under every standardization.
       for (gi in seq_along(names(blocks))) {
         add(paste0("rho_", names(blocks)[gi]), ":=", "",
-            summarize_var(rg[, , gi, drop = FALSE]))
+            dr(rg[, , gi, drop = FALSE]))
       }
     }
   }
 
-  out <- do.call(rbind, rows)
+  # Column/row label, in the lavaan-and-blavaan convention: lhs, operator and
+  # rhs concatenated without spaces ("F1=~it3", "F1~cov", "it3~~it3",
+  # "it3~1"). Defined quantities with no rhs keep just their name.
+  lab <- function(r) {
+    if (nzchar(r$rhs) || identical(r$op, "~1")) {
+      paste0(r$lhs, r$op, r$rhs)
+    } else {
+      r$lhs
+    }
+  }
+
+  if (identical(ret, "draws")) {
+    # Shape of the draws, taken from the first row that actually has any.
+    has <- which(vapply(rows, function(r) !is.null(r$draws), logical(1)))
+    if (!length(has)) {
+      stop("No posterior draws were found for any reported parameter.",
+           call. = FALSE)
+    }
+    d1 <- dim(rows[[has[1]]]$draws)
+    n_iter <- d1[1]; n_chain <- d1[2]; n_draw <- n_iter * n_chain
+    cols <- lapply(rows, function(r) {
+      # Parameters FIXED by the model (unity hyper loadings, unit facet
+      # disturbances) have no draws; they are returned as constant columns so
+      # that the draws matrix has exactly one column per summary row.
+      if (is.null(r$draws)) rep(r$value, n_draw) else as.numeric(r$draws)
+    })
+    out <- as.data.frame(stats::setNames(cols, vapply(rows, lab, character(1))),
+                         check.names = FALSE, stringsAsFactors = FALSE)
+    rownames(out) <- NULL
+    # Draws are ordered iteration-within-chain, matching
+    # posterior::as_draws_matrix(); the indices are attached rather than
+    # added as columns so the frame stays purely parameters-by-draws.
+    attr(out, "chain") <- rep(seq_len(n_chain), each = n_iter)
+    attr(out, "iteration") <- rep(seq_len(n_iter), times = n_chain)
+    attr(out, "nchains") <- n_chain
+    attr(out, "standardize") <- standardize
+    return(out)
+  }
+
+  out <- do.call(rbind, lapply(rows, function(r) {
+    st <- if (is.null(r$draws)) {
+      c(est = r$value, se = 0, ci.lower = r$value, ci.upper = r$value,
+        rhat = NA_real_, ess_bulk = NA_real_, ess_tail = NA_real_)
+    } else {
+      summarize_var(r$draws)
+    }
+    data.frame(lhs = r$lhs, op = r$op, rhs = r$rhs, t(st),
+               stringsAsFactors = FALSE)
+  }))
   rownames(out) <- NULL
   attr(out, "prob") <- prob
   attr(out, "standardize") <- standardize

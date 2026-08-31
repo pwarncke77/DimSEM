@@ -161,7 +161,10 @@ anes_args <- list(chains = 16L, parallel_chains = 16L,
 # saveRDS(fit32, "dimsem_32_party_unity_anchored.rds")
 fit32 <- readRDS("dimsem_32_party_unity_anchored.rds")
 
-tab32 <- DimSEM_parameterEstimates(fit32, standardize = "std.all")
+tab32 <- DimSEM_parameterEstimates(fit32, standardize = "std.lv")
+
+tab32_draws <- DimSEM_parameterEstimates(fit32, return = "draws", standardize = "std.lv")
+
 
 
 tab32 <- DimSEM_parameterEstimates(fit32)

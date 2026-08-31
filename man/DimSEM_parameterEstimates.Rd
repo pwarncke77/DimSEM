@@ -7,7 +7,8 @@
 DimSEM_parameterEstimates(
   object,
   prob = 0.95,
-  standardize = c("none", "std.lv", "std.all")
+  standardize = c("none", "std.lv", "std.all"),
+  return = c("summary", "draws")
 )
 }
 \arguments{
@@ -16,10 +17,15 @@ DimSEM_parameterEstimates(
 \item{prob}{Central interval mass (default .95).}
 
 \item{standardize}{One of \code{"none"}, \code{"std.lv"}, \code{"std.all"}; see
-Standardization.}
+Standardization. A logical is also accepted, \code{FALSE} meaning \code{"none"}
+and \code{TRUE} meaning \code{"std.all"}.}
+
+\item{return}{\code{"summary"} (default) for the parameter table, or
+\code{"draws"} for the posterior draws; see Posterior draws.}
 }
 \value{
-A data frame in lavaan \code{parameterEstimates()} layout.
+A data frame: the parameter table under \code{return = "summary"},
+or draws-by-parameters under \code{return = "draws"}.
 }
 \description{
 Returns the main model parameters of a \code{\link[=DimSEM_estimate]{DimSEM_estimate()}} fit in the
@@ -65,5 +71,26 @@ Note that \code{~} rows are DIRECT effects, holding the hyper-factor fixed;
 the \verb{:=} \verb{<factor>_total} rows carry the total effects, which are what
 the likelihood identifies. Under unity loadings \verb{rho_<block>} is already
 a correlation and is therefore identical under every standardization.
+}
+
+\section{Posterior draws}{
+
+\code{return = "draws"} returns the posterior draws themselves rather than a
+summary, in the manner of \code{\link[blavaan:standardizedPosterior]{blavaan::standardizedPosterior()}}: a data frame
+of draws (rows) by parameters (columns), with columns named in the
+lavaan convention -- \code{"F1=~it3"}, \code{"F1~cov"}, \code{"it3~~it3"}, \code{"it3~1"}.
+\code{standardize} applies exactly as it does to the summary, so the draws are
+raw, \code{std.lv}- or \code{std.all}-scaled on request.
+
+The columns correspond one-to-one, and in order, to the rows of the
+summary table for the same arguments -- which makes the two views
+interchangeable and lets any further quantity be derived draw-wise.
+Parameters FIXED by the model (unity hyper loadings, unit facet
+disturbances) appear as constant columns rather than being dropped, so
+that correspondence holds; note they become genuine varying quantities
+once \code{standardize} is not \code{"none"}. Draws are ordered
+iteration-within-chain, as in \code{\link[posterior:draws_matrix]{posterior::as_draws_matrix()}}, and the
+chain and iteration indices are attached as attributes rather than added
+as columns. \code{return = "draws"} requires \code{engine = "bayes"}.
 }
 

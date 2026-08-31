@@ -154,13 +154,26 @@ anes_args <- list(chains = 16L, parallel_chains = 16L,
                   adapt_delta = 0.9, max_treedepth = 20L,
                   likelihood = "normal", priors = blav_priors)
 
-fit32 <- fit_cfg(prop32, dat_x_complete, "party_scale", "unity",
-                 anchor = TRUE, cfa_init = TRUE, marginal = TRUE,
-                 bayes_extra = c(anes_args,
-                                 list(standardize_covariates = FALSE)))
-saveRDS(fit32, "dimsem_32_party_unity_anchored.rds")
+# fit32 <- fit_cfg(prop32, dat_x_complete, "party_scale", "unity",
+#                  anchor = TRUE, cfa_init = TRUE, marginal = TRUE,
+#                  bayes_extra = c(anes_args,
+#                                  list(standardize_covariates = FALSE)))
+# saveRDS(fit32, "dimsem_32_party_unity_anchored.rds")
+fit32 <- readRDS("dimsem_32_party_unity_anchored.rds")
+
+tab32 <- DimSEM_parameterEstimates(fit32, standardize = "std.all")
+
+
 tab32 <- DimSEM_parameterEstimates(fit32)
 write.csv(tab32, "dimsem_32_party_unity_anchored.csv", row.names = FALSE)
+
+
+?DimSEM_parameterEstimates()
+
+library(blavaan)
+
+?standardizedPosterior()
+
 
 cat("\n============ SECTION 2: ANES structural block ============\n")
 print(tab32[tab32$op %in% c("~", ":="), ], row.names = FALSE, digits = 4)

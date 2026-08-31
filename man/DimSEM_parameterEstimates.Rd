@@ -2,30 +2,68 @@
 % Please edit documentation in R/helpers.R
 \name{DimSEM_parameterEstimates}
 \alias{DimSEM_parameterEstimates}
-\title{Lavaan-style parameter table for Bayesian DimSem fits}
+\title{Lavaan-style parameter table for DimSEM fits}
 \usage{
-DimSEM_parameterEstimates(object, prob = 0.95)
+DimSEM_parameterEstimates(
+  object,
+  prob = 0.95,
+  standardize = c("none", "std.lv", "std.all")
+)
 }
 \arguments{
-\item{object}{A \code{"DimSEM_estimate"} object fitted with \code{engine = "bayes"}.}
+\item{object}{A \code{"DimSEM_estimate"} object.}
 
-\item{prob}{Central credible-interval mass (default .95).}
+\item{prob}{Central interval mass (default .95).}
+
+\item{standardize}{One of \code{"none"}, \code{"std.lv"}, \code{"std.all"}; see
+Standardization.}
 }
 \value{
 A data frame in lavaan \code{parameterEstimates()} layout.
 }
 \description{
-Returns the main model parameters of a \code{\link[=DimSEM_estimate]{DimSEM_estimate()}} Bayesian fit
-in the layout of \code{\link[lavaan:parameterEstimates]{lavaan::parameterEstimates()}}: \code{lhs}/\code{op}/\code{rhs} rows
-(\verb{=~} loadings including hyper loadings, \code{~1} intercepts, \verb{~~} residual
-and hyper-factor variances, \code{~} covariate regressions, \verb{:=} defined
-quantities such as the implied within-block correlation under unity
-loadings), excluding all Stan scaffolding (unconstrained \verb{*_un}
-parameters, latent scores, innovations, sign indicators). Sign-bearing
-quantities come from the sign-relabeled generated quantities, so signs
-and diagnostics are directly interpretable. Columns: posterior mean
-(\code{est}), posterior SD (\code{se}), central credible interval at \code{prob}, and
-\code{rhat}/\code{ess_bulk}/\code{ess_tail}. Fixed values (unity hyper loadings,
-standardized disturbances) show \code{se = 0} and \code{NA} diagnostics,
-mirroring lavaan's display of fixed parameters.
+Returns the main model parameters of a \code{\link[=DimSEM_estimate]{DimSEM_estimate()}} fit in the
+layout of \code{\link[lavaan:parameterEstimates]{lavaan::parameterEstimates()}}: \code{lhs}/\code{op}/\code{rhs} rows (\verb{=~}
+loadings including hyper loadings, \code{~1} intercepts, \verb{~~} residual and
+hyper-factor variances, \code{~} covariate regressions, \verb{:=} defined
+quantities such as the total covariate effects and the implied
+within-block correlation under unity loadings), excluding all Stan
+scaffolding (unconstrained \verb{*_un} parameters, latent scores,
+innovations, sign indicators). Sign-bearing quantities come from the
+sign-relabeled generated quantities, so signs and diagnostics are
+directly interpretable. Columns: \code{est}, \code{se}, a central interval at
+\code{prob}, and \code{rhat}/\code{ess_bulk}/\code{ess_tail} (\code{NA} for ML fits and for
+parameters fixed by the model).
 }
+\section{Standardization}{
+
+\code{standardize} rescales the table using the MODEL-IMPLIED variances:
+\describe{
+\item{\code{"none"}}{(default) the estimated metric, in which each facet
+disturbance has variance 1 and the loadings carry the scale.}
+\item{\code{"std.lv"}}{latent variables standardized, observed variables
+left on their original scale: loadings are multiplied by the facet
+SD, latent regressions divided by it, and observed intercepts and
+residual variances are untouched.}
+\item{\code{"std.all"}}{both latent and observed standardized, so loadings
+become item-factor correlations, residual variances become
+\eqn{1 - R^2}, and regressions are expressed per SD of the
+predictor.}
+}
+The covariate SDs are taken from the design matrix AS THE MODEL SAW IT,
+so \code{standardize_covariates} is accounted for automatically and nothing
+needs to be supplied by the caller.
+
+For \code{engine = "bayes"} the rescaling is applied PER DRAW and the result
+summarized, in the manner of \code{\link[blavaan:standardizedPosterior]{blavaan::standardizedPosterior()}}. This is
+not the same as rescaling the posterior means: the scale factors are
+nonlinear functions of the parameters, so a plug-in calculation would
+misstate both the point estimate and the interval. For \code{engine = "ml"}
+the request is delegated to \code{\link[lavaan:standardizedSolution]{lavaan::standardizedSolution()}}.
+
+Note that \code{~} rows are DIRECT effects, holding the hyper-factor fixed;
+the \verb{:=} \verb{<factor>_total} rows carry the total effects, which are what
+the likelihood identifies. Under unity loadings \verb{rho_<block>} is already
+a correlation and is therefore identical under every standardization.
+}
+

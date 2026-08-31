@@ -4976,37 +4976,231 @@ print.DimSEM_posterior <- function(x, ...) {
   ref
 }
 
-#' Lavaan-style parameter table for Bayesian DimSem fits
+# --- Model-implied scales for standardization --------------------------------
+#
+# Standardization needs the model-implied SDs of everything that can be
+# rescaled. In DimSEM's parameterization each facet disturbance has variance 1
+# and the loadings carry the scale, so with Sigma_X the covariance of the
+# covariate matrix AS THE MODEL SAW IT (already z-scored when
+# standardize_covariates = TRUE, raw otherwise -- taking it from stan_data$X
+# means the caller never has to supply it):
+#
+#     var(G_g)   = alpha_g' Sigma_X alpha_g + tau_g^2
+#     var(eta_k) = t_k' Sigma_X t_k + delta_k^2 tau_g^2 + 1,  t_k = beta_k + delta_k alpha
+#     var(y_j)   = lambda_j^2 var(eta_k(j)) + sigma_j^2
+#
+# with tau_g == 1 under free loadings and delta_k == 1 under unity. Every
+# quantity is computed PER DRAW, so the reported intervals are posterior
+# intervals of the standardized quantity rather than a plug-in built from
+# posterior means -- the distinction that matters for anything nonlinear,
+# and the reason blavaan::standardizedPosterior() exists.
+#
+# Returns NULL for type = "none".
+.dimsem_std_scales <- function(object, type) {
+  if (identical(type, "none")) return(NULL)
+  map <- object$param_map
+  blocks <- object$hyper_blocks %||% list()
+  unity <- identical(map$hyper_loadings, "unity")
+  sd_dat <- object$stan$data
+  K <- length(map$factors); P <- length(map$items)
+  G <- max(length(blocks), 0L)
+
+  # unclass() matters: posterior's `[.draws_array` PRESERVES the variable
+  # dimension rather than dropping it, so `B[, , i]` on a draws_array returns
+  # a draws x chains x 1 array while the same expression on a base array
+  # returns a draws x chains matrix. Mixing the two is what makes the
+  # arithmetic below non-conformable. Everything in this function is plain
+  # base-array algebra; the draws classes are restored where the results are
+  # summarized.
+  gv <- function(v) {
+    d <- tryCatch(object$fit$draws(variables = v), error = function(e) NULL)
+    if (is.null(d)) NULL else unclass(posterior::as_draws_array(d))
+  }
+  lam <- gv("lambda"); sig <- gv("sigma")
+  if (is.null(lam) || is.null(sig)) {
+    stop("Standardization needs the `lambda` and `sigma` draws, which are ",
+         "not present in this fit. Refit, or call with standardize = ",
+         "\"none\".", call. = FALSE)
+  }
+  dm <- dim(lam)[1:2]
+  if (!identical(dim(sig)[1:2], dm)) {
+    stop("`lambda` and `sigma` draws have different iteration/chain ",
+         "dimensions; the fit object looks inconsistent.", call. = FALSE)
+  }
+
+  # Sigma_X and the quadratic form t' Sigma_X t, accumulated per draw.
+  Q <- sd_dat$Q %||% 0L
+  SX <- if (Q > 0L) stats::cov(sd_dat$X) else NULL
+  sd_x <- if (Q > 0L) sqrt(diag(as.matrix(SX))) else numeric(0)
+
+  quad <- function(B, idx_fun, n) {
+    # B: draws x chains x (Q*n) array of coefficients; returns the quadratic
+    # form for each of the n columns.
+    out <- array(0, c(dm, n))
+    if (Q == 0L || is.null(B)) return(out)
+    for (i in seq_len(n)) {
+      for (a in seq_len(Q)) {
+        ia <- idx_fun(a, i); if (is.na(ia)) next
+        for (b in seq_len(Q)) {
+          ib <- idx_fun(b, i); if (is.na(ib)) next
+          out[, , i] <- out[, , i] +
+            SX[a, b] * B[, , ia] * B[, , ib]
+        }
+      }
+    }
+    out
+  }
+
+  # delta and tau, expanded to per-factor / per-block draw arrays
+  tau2 <- array(1, c(dm, max(G, 1L)))
+  if (G > 0L && unity) {
+    tg <- gv("tau_g")
+    if (!is.null(tg)) for (g in seq_len(G)) tau2[, , g] <- tg[, , g]^2
+  }
+  delta <- array(0, c(dm, K))
+  fh <- integer(K)
+  if (G > 0L) {
+    fh <- sd_dat$factor_hyper %||% integer(K)
+    if (unity) {
+      for (k in seq_len(K)) if (fh[k] > 0L) delta[, , k] <- 1
+    } else {
+      ds <- gv("delta")
+      if (!is.null(ds)) for (k in seq_len(K)) delta[, , k] <- ds[, , k]
+    }
+  }
+
+  # var(G_g)
+  bg <- if (G > 0L) gv("beta_g_cor") else NULL
+  qg <- quad(bg, function(a, g)
+    match(paste0("beta_g_cor[", a, ",", g, "]"), dimnames(bg)[[3]]),
+    max(G, 1L))
+  var_G <- array(0, c(dm, max(G, 1L)))
+  for (g in seq_len(max(G, 1L))) var_G[, , g] <- qg[, , g] + tau2[, , g]
+
+  # var(eta_k) via the TOTAL effects (beta_total when a hyper parent exists,
+  # beta_f_cor otherwise) -- the same t_k the table reports.
+  bt <- gv("beta_total"); bf <- gv("beta_f_cor")
+  qt <- array(0, c(dm, K))
+  if (Q > 0L) {
+    for (k in seq_len(K)) {
+      src <- if (fh[k] > 0L && !is.null(bt)) bt else bf
+      nmv <- if (identical(src, bt)) "beta_total" else "beta_f_cor"
+      if (is.null(src)) next
+      for (a in seq_len(Q)) {
+        ia <- match(paste0(nmv, "[", a, ",", k, "]"), dimnames(src)[[3]])
+        if (is.na(ia)) next
+        for (b in seq_len(Q)) {
+          ib <- match(paste0(nmv, "[", b, ",", k, "]"), dimnames(src)[[3]])
+          if (is.na(ib)) next
+          qt[, , k] <- qt[, , k] + SX[a, b] * src[, , ia] * src[, , ib]
+        }
+      }
+    }
+  }
+  var_eta <- array(0, c(dm, K))
+  for (k in seq_len(K)) {
+    hv <- if (fh[k] > 0L) delta[, , k]^2 * tau2[, , fh[k]] else 0
+    var_eta[, , k] <- qt[, , k] + hv + 1
+  }
+
+  # var(y_j)
+  itf <- sd_dat$item_factor
+  var_y <- array(0, c(dm, P))
+  for (j in seq_len(P)) {
+    var_y[, , j] <- lam[, , j]^2 * var_eta[, , itf[j]] + sig[, , j]^2
+  }
+
+  list(type = type, sd_x = sd_x, factor_hyper = fh,
+       var_eta = var_eta, sd_eta = sqrt(var_eta),
+       var_G = var_G, sd_G = sqrt(var_G),
+       var_y = var_y, sd_y = sqrt(var_y))
+}
+
+
+#' Lavaan-style parameter table for DimSEM fits
 #'
-#' Returns the main model parameters of a [DimSEM_estimate()] Bayesian fit
-#' in the layout of [lavaan::parameterEstimates()]: `lhs`/`op`/`rhs` rows
-#' (`=~` loadings including hyper loadings, `~1` intercepts, `~~` residual
-#' and hyper-factor variances, `~` covariate regressions, `:=` defined
-#' quantities such as the implied within-block correlation under unity
-#' loadings), excluding all Stan scaffolding (unconstrained `*_un`
-#' parameters, latent scores, innovations, sign indicators). Sign-bearing
-#' quantities come from the sign-relabeled generated quantities, so signs
-#' and diagnostics are directly interpretable. Columns: posterior mean
-#' (`est`), posterior SD (`se`), central credible interval at `prob`, and
-#' `rhat`/`ess_bulk`/`ess_tail`. Fixed values (unity hyper loadings,
-#' standardized disturbances) show `se = 0` and `NA` diagnostics,
-#' mirroring lavaan's display of fixed parameters.
+#' Returns the main model parameters of a [DimSEM_estimate()] fit in the
+#' layout of [lavaan::parameterEstimates()]: `lhs`/`op`/`rhs` rows (`=~`
+#' loadings including hyper loadings, `~1` intercepts, `~~` residual and
+#' hyper-factor variances, `~` covariate regressions, `:=` defined
+#' quantities such as the total covariate effects and the implied
+#' within-block correlation under unity loadings), excluding all Stan
+#' scaffolding (unconstrained `*_un` parameters, latent scores,
+#' innovations, sign indicators). Sign-bearing quantities come from the
+#' sign-relabeled generated quantities, so signs and diagnostics are
+#' directly interpretable. Columns: `est`, `se`, a central interval at
+#' `prob`, and `rhat`/`ess_bulk`/`ess_tail` (`NA` for ML fits and for
+#' parameters fixed by the model).
 #'
-#' @param object A `"DimSEM_estimate"` object fitted with `engine = "bayes"`.
-#' @param prob Central credible-interval mass (default .95).
+#' @section Standardization:
+#' `standardize` rescales the table using the MODEL-IMPLIED variances:
+#' \describe{
+#'   \item{`"none"`}{(default) the estimated metric, in which each facet
+#'     disturbance has variance 1 and the loadings carry the scale.}
+#'   \item{`"std.lv"`}{latent variables standardized, observed variables
+#'     left on their original scale: loadings are multiplied by the facet
+#'     SD, latent regressions divided by it, and observed intercepts and
+#'     residual variances are untouched.}
+#'   \item{`"std.all"`}{both latent and observed standardized, so loadings
+#'     become item-factor correlations, residual variances become
+#'     \eqn{1 - R^2}, and regressions are expressed per SD of the
+#'     predictor.}
+#' }
+#' The covariate SDs are taken from the design matrix AS THE MODEL SAW IT,
+#' so `standardize_covariates` is accounted for automatically and nothing
+#' needs to be supplied by the caller.
+#'
+#' For `engine = "bayes"` the rescaling is applied PER DRAW and the result
+#' summarized, in the manner of [blavaan::standardizedPosterior()]. This is
+#' not the same as rescaling the posterior means: the scale factors are
+#' nonlinear functions of the parameters, so a plug-in calculation would
+#' misstate both the point estimate and the interval. For `engine = "ml"`
+#' the request is delegated to [lavaan::standardizedSolution()].
+#'
+#' Note that `~` rows are DIRECT effects, holding the hyper-factor fixed;
+#' the `:=` `<factor>_total` rows carry the total effects, which are what
+#' the likelihood identifies. Under unity loadings `rho_<block>` is already
+#' a correlation and is therefore identical under every standardization.
+#'
+#' @param object A `"DimSEM_estimate"` object.
+#' @param prob Central interval mass (default .95).
+#' @param standardize One of `"none"`, `"std.lv"`, `"std.all"`; see
+#'   Standardization.
 #' @return A data frame in lavaan `parameterEstimates()` layout.
 #' @export
-DimSEM_parameterEstimates <- function(object, prob = 0.95) {
+DimSEM_parameterEstimates <- function(object, prob = 0.95,
+                                      standardize = c("none", "std.lv",
+                                                      "std.all")) {
+  standardize <- match.arg(standardize)
   if (!inherits(object, "DimSEM_estimate")) {
     stop("`object` must be a DimSEM_estimate object.", call. = FALSE)
   }
-  if (!identical(object$engine, "bayes")) {
-    stop("Use lavaan::parameterEstimates(object$fit) for ML fits; this ",
-         "table is for engine = \"bayes\".", call. = FALSE)
-  }
   if (is.null(object$fit)) {
-    stop("No fitted Stan object present (dry run); re-run with a real ",
-         "cmdstanr backend.", call. = FALSE)
+    stop("No fitted object present (dry run); re-run with a real backend.",
+         call. = FALSE)
+  }
+
+  # ML engine: lavaan already implements both standardizations, so delegate
+  # rather than reimplement them. The returned layout matches the Bayesian
+  # table (rhat/ESS are NA, which is what they mean for a point estimate).
+  if (!identical(object$engine, "bayes")) {
+    .dimsem_require_namespace("lavaan")
+    tb <- if (identical(standardize, "none")) {
+      pe <- lavaan::parameterEstimates(object$fit, level = prob)
+      data.frame(lhs = pe$lhs, op = pe$op, rhs = pe$rhs, est = pe$est,
+                 se = pe$se, ci.lower = pe$ci.lower, ci.upper = pe$ci.upper,
+                 stringsAsFactors = FALSE)
+    } else {
+      ss <- lavaan::standardizedSolution(
+        object$fit, type = standardize, level = prob)
+      data.frame(lhs = ss$lhs, op = ss$op, rhs = ss$rhs, est = ss$est.std,
+                 se = ss$se, ci.lower = ss$ci.lower, ci.upper = ss$ci.upper,
+                 stringsAsFactors = FALSE)
+    }
+    tb$rhat <- NA_real_; tb$ess_bulk <- NA_real_; tb$ess_tail <- NA_real_
+    attr(tb, "prob") <- prob
+    attr(tb, "standardize") <- standardize
+    return(tb)
   }
   .dimsem_require_namespace("posterior")
   map <- object$param_map
@@ -5016,6 +5210,9 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95) {
   qs <- c((1 - prob) / 2, 1 - (1 - prob) / 2)
 
   summarize_var <- function(a) {
+    # `a` may arrive as a draws_array (unstandardized) or as a plain base
+    # array (standardized); as_draws_array() accepts both.
+    a <- posterior::as_draws_array(a)
     m <- as.numeric(a)
     c(est = mean(m), se = stats::sd(m),
       ci.lower = unname(stats::quantile(m, qs[1])),
@@ -5029,6 +5226,47 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95) {
                   error = function(e) NULL)
     if (is.null(d)) NULL else posterior::as_draws_array(d)
   }
+  # Model-implied SDs, per draw. NULL when standardize = "none".
+  SC <- .dimsem_std_scales(object, standardize)
+  all_std <- identical(standardize, "std.all")
+  fac_of <- function(item) match(paste0("F", part[item]), map$factors)
+  # Item loading: multiply by the facet SD; divide by the item SD for std.all.
+  s_lam <- function(a, j) {
+    if (is.null(SC)) return(a)
+    a <- unclass(a)
+    k <- fac_of(map$items[j])
+    r <- a * SC$sd_eta[, , k, drop = FALSE]
+    if (all_std) r <- r / SC$sd_y[, , j, drop = FALSE]
+    r
+  }
+  # Hyper loading: latent on latent, so identical under std.lv and std.all.
+  s_delta <- function(a, k, g) {
+    if (is.null(SC)) return(a)
+    unclass(a) * SC$sd_G[, , g, drop = FALSE] /
+      SC$sd_eta[, , k, drop = FALSE]
+  }
+  # Observed intercept / residual variance: untouched unless std.all.
+  s_nu <- function(a, j) {
+    if (is.null(SC) || !all_std) return(a)
+    unclass(a) / SC$sd_y[, , j, drop = FALSE]
+  }
+  s_sig2 <- function(a, j) {
+    if (is.null(SC) || !all_std) return(a)
+    unclass(a) / SC$var_y[, , j, drop = FALSE]
+  }
+  # Latent residual variances become proportions of the latent's total.
+  s_psi_eta <- function(k) 1 / SC$var_eta[, , k, drop = FALSE]
+  s_psi_G <- function(a, g) unclass(a) / SC$var_G[, , g, drop = FALSE]
+  # Regression of a latent on a covariate.
+  s_beta <- function(a, q, k, on_G = FALSE) {
+    if (is.null(SC)) return(a)
+    den <- if (on_G) SC$sd_G[, , k, drop = FALSE] else
+      SC$sd_eta[, , k, drop = FALSE]
+    r <- unclass(a) / den
+    if (all_std) r <- r * SC$sd_x[q]
+    r
+  }
+
   rows <- list()
   add <- function(lhs, op, rhs, stats_row) {
     rows[[length(rows) + 1]] <<- data.frame(
@@ -5045,13 +5283,24 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95) {
   if (!is.null(lam)) {
     for (i in seq_along(map$items)) {
       add(paste0("F", part[map$items[i]]), "=~", map$items[i],
-          summarize_var(lam[, , i, drop = FALSE]))
+          summarize_var(s_lam(lam[, , i, drop = FALSE], i)))
     }
   }
   if (length(blocks) > 0) {
     if (unity) {
-      for (g in names(blocks)) {
-        for (fk in blocks[[g]]) add_fixed(g, "=~", fk, 1)
+      for (gi in seq_along(names(blocks))) {
+        g <- names(blocks)[gi]
+        for (fk in blocks[[g]]) {
+          k <- match(fk, map$factors)
+          if (is.null(SC)) {
+            add_fixed(g, "=~", fk, 1)
+          } else {
+            add(g, "=~", fk,
+                summarize_var(s_delta(array(1, dim(SC$sd_eta[, , k,
+                                                             drop = FALSE])),
+                                      k, gi)))
+          }
+        }
       }
     } else {
       ds <- grab("delta")
@@ -5059,7 +5308,9 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95) {
         for (g in names(blocks)) {
           for (fk in blocks[[g]]) {
             k <- match(fk, map$factors)
-            add(g, "=~", fk, summarize_var(ds[, , k, drop = FALSE]))
+            gi <- match(g, names(blocks))
+            add(g, "=~", fk,
+                summarize_var(s_delta(ds[, , k, drop = FALSE], k, gi)))
           }
         }
       }
@@ -5068,7 +5319,8 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95) {
   nu <- grab("nu")
   if (!is.null(nu)) {
     for (i in seq_along(map$items)) {
-      add(map$items[i], "~1", "", summarize_var(nu[, , i, drop = FALSE]))
+      add(map$items[i], "~1", "",
+          summarize_var(s_nu(nu[, , i, drop = FALSE], i)))
     }
   }
   # Residual VARIANCES: sigma^2 transformed draw-wise (lavaan-canonical).
@@ -5076,21 +5328,36 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95) {
   if (!is.null(sig)) {
     for (i in seq_along(map$items)) {
       add(map$items[i], "~~", map$items[i],
-          summarize_var(sig[, , i, drop = FALSE]^2))
+          summarize_var(s_sig2(sig[, , i, drop = FALSE]^2, i)))
     }
   }
-  for (fk in map$factors) add_fixed(fk, "~~", fk, 1)
+  for (ki in seq_along(map$factors)) {
+    if (is.null(SC)) {
+      add_fixed(map$factors[ki], "~~", map$factors[ki], 1)
+    } else {
+      add(map$factors[ki], "~~", map$factors[ki],
+          summarize_var(s_psi_eta(ki)))
+    }
+  }
   if (length(blocks) > 0) {
     if (unity) {
       tg <- grab("tau_g")
       if (!is.null(tg)) {
         for (gi in seq_along(names(blocks))) {
           add(names(blocks)[gi], "~~", names(blocks)[gi],
-              summarize_var(tg[, , gi, drop = FALSE]^2))
+              summarize_var(s_psi_G(tg[, , gi, drop = FALSE]^2, gi)))
         }
       }
     } else {
-      for (g in names(blocks)) add_fixed(g, "~~", g, 1)
+      for (gi in seq_along(names(blocks))) {
+        if (is.null(SC)) {
+          add_fixed(names(blocks)[gi], "~~", names(blocks)[gi], 1)
+        } else {
+          add(names(blocks)[gi], "~~", names(blocks)[gi],
+              summarize_var(s_psi_G(array(1, dim(SC$var_G[, , gi,
+                                                          drop = FALSE])), gi)))
+        }
+      }
     }
   }
   if (length(map$covariates) > 0) {
@@ -5102,7 +5369,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95) {
                        dimnames(bf)[[3]])
           if (!is.na(idx)) {
             add(map$factors[k], "~", map$covariates[q],
-                summarize_var(bf[, , idx, drop = FALSE]))
+                summarize_var(s_beta(bf[, , idx, drop = FALSE], q, k)))
           }
         }
       }
@@ -5116,7 +5383,8 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95) {
                          dimnames(bg)[[3]])
             if (!is.na(idx)) {
               add(names(blocks)[gi], "~", map$covariates[q],
-                  summarize_var(bg[, , idx, drop = FALSE]))
+                  summarize_var(s_beta(bg[, , idx, drop = FALSE], q, gi,
+                                       on_G = TRUE)))
             }
           }
         }
@@ -5137,7 +5405,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95) {
                        dimnames(bt)[[3]])
           if (!is.na(idx)) {
             add(paste0(map$factors[ki], "_total"), ":=", map$covariates[q],
-                summarize_var(bt[, , idx, drop = FALSE]))
+                summarize_var(s_beta(bt[, , idx, drop = FALSE], q, ki)))
           }
         }
       }
@@ -5146,6 +5414,8 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95) {
   if (length(blocks) > 0 && unity) {
     rg <- grab("rho_g")
     if (!is.null(rg)) {
+      # rho_g is already a correlation, so it is scale-free and identical
+      # under every standardization.
       for (gi in seq_along(names(blocks))) {
         add(paste0("rho_", names(blocks)[gi]), ":=", "",
             summarize_var(rg[, , gi, drop = FALSE]))
@@ -5156,6 +5426,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95) {
   out <- do.call(rbind, rows)
   rownames(out) <- NULL
   attr(out, "prob") <- prob
+  attr(out, "standardize") <- standardize
   out
 }
 

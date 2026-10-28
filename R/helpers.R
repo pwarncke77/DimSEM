@@ -1587,7 +1587,7 @@
 
   alpha <- hyper_args$alpha %||% 0.05
   # The minimum attainable permutation p-value is 1/(n_perm + 1), so after
-  # BH correction the best possible adjusted p for a SINGLE validated pair
+  # BH correction the best possible adjusted p for a single validated pair
   # is n_pairs / (n_perm + 1). The default number of permutations therefore
   # scales with the number of community pairs so that even one lone true
   # connection can survive FDR at `alpha` (factor 2 for headroom),
@@ -4803,6 +4803,351 @@ if (has_cov && has_hyper) paste0(
 #            structural, hyper, correlations; "all" adds intercepts and
 #            residual SDs; or a character vector of block names.
 #   prob   : central credible-interval mass (default .95).
+# --- Parameter-name parsing (lavaan operator precedence) ---------------------
+#
+# Splits "F1=~it3" / "it3~~it3" / "it3~1" / "F1~cov" / "F1_total" into their
+# parts. Order matters: "=~" and "~~" both contain "~", so they must be tested
+# first, and a right-hand side of exactly "1" means an intercept rather than a
+# regression on a covariate named 1.
+.dimsem_parse_par <- function(nm) {
+  lhs <- op <- rhs <- character(length(nm))
+  for (i in seq_along(nm)) {
+    s <- nm[i]
+    if (grepl(":=", s, fixed = TRUE)) {
+      # Defined quantities are emitted as "F1_total:=cov"; ":=" contains no
+      # "~" and is not "=~", so it must be tested on its own.
+      p <- strsplit(s, ":=", fixed = TRUE)[[1]]; op[i] <- ":="
+    } else if (grepl("=~", s, fixed = TRUE)) {
+      p <- strsplit(s, "=~", fixed = TRUE)[[1]]; op[i] <- "=~"
+    } else if (grepl("~~", s, fixed = TRUE)) {
+      p <- strsplit(s, "~~", fixed = TRUE)[[1]]; op[i] <- "~~"
+    } else if (grepl("~", s, fixed = TRUE)) {
+      p <- strsplit(s, "~", fixed = TRUE)[[1]]
+      op[i] <- if (length(p) > 1L && identical(p[2], "1")) "~1" else "~"
+    } else {
+      p <- c(s, ""); op[i] <- ":="
+    }
+    lhs[i] <- p[1]
+    rhs[i] <- if (length(p) > 1L) p[2] else ""
+  }
+  data.frame(name = nm, lhs = lhs, op = op, rhs = rhs,
+             stringsAsFactors = FALSE)
+}
+
+
+#' Plot covariate regression coefficients from a DimSEM fit
+#'
+#' Summarizes the covariate effects of a [DimSEM_estimate()] fit as a single
+#' ggplot: stacked posterior densities when draws are available, and a
+#' dot-and-whisker plot otherwise. Hyper-factors are always placed at the top
+#' and first-order facets below them in factor order, so the plot reads as the
+#' decomposition it is -- the generalized effect above, each dimension's
+#' departure from it beneath.
+#'
+#' @details
+#' `object` may be a `"DimSEM_estimate"` fit, in which case
+#' [DimSEM_parameterEstimates()] is called under the hood and any of its
+#' arguments (`prob`, `standardize`, `return`) may be passed through `...`; or
+#' it may be a table that function already returned, in either the summary or
+#' the draws form. For a Bayesian fit with no explicit `return`, draws are
+#' requested, since the densities are the more informative display; ML fits
+#' always give the dot-and-whisker form because there is no posterior to draw.
+#'
+#' Note what is being plotted. With `effects = "direct"` (the default) the `~`
+#' rows are shown: under `covariate_identification = "sum_to_zero"` these are
+#' each facet's DEPARTURE from the common effect, and the hyper row is the
+#' common effect itself. With `effects = "total"` the `:=` `<factor>_total`
+#' rows are shown instead -- the quantities the likelihood identifies
+#' regardless of how the split is conventionalized -- alongside the hyper row.
+#' The two answer different questions and the axis label records which is on
+#' display.
+#'
+#' @param object A `"DimSEM_estimate"` fit, or a [DimSEM_parameterEstimates()]
+#'   result (summary or draws).
+#' @param ... Passed to [DimSEM_parameterEstimates()] when `object` is a fit;
+#'   ignored otherwise (with a warning, since silently dropping them would
+#'   hide a typo).
+#' @param covariates Optional character vector selecting which covariates to
+#'   show. Default is all; more than one produces a facetted plot.
+#' @param effects `"direct"` (default) or `"total"`; see Details.
+#' @param hyper Optional character vector naming the hyper-factors. Taken from
+#'   the fit when available, otherwise inferred as any left-hand side not of
+#'   the form `F<number>`.
+#' @param labels Optional labels for the vertical axis. Either a NAMED vector
+#'   keyed by parameter name (`c(G1 = "Generalized ideology", F1 = "Economic")`)
+#'   -- recommended, since it does not depend on plot order -- or an unnamed
+#'   vector of the same length as the number of rows, read top to bottom.
+#'   Entries may be plotmath rather than plain strings, which is the way to
+#'   emphasize PART of a label: `element_text()` applies a fontface to the
+#'   whole string, whereas
+#'   `bquote(bold("Generalized ideology") * " (hyper-factor)")` bolds only the
+#'   first half. Mixing the two forms in one call is fine -- if any entry is
+#'   plotmath the rest are coerced, and plain strings pass through unchanged.
+#' @param fill,colour Aesthetics, each either a single value or a vector named
+#'   `hyper` and `facet` to distinguish the two levels.
+#' @param alpha Fill transparency for the densities.
+#' @param scale Height of each density as a fraction of the row spacing;
+#'   values above 1 let neighbouring densities overlap, as ridgelines usually
+#'   do.
+#' @param interval Draw a credible/confidence interval bar beneath each
+#'   density (draws mode only). The mass is taken from `prob`.
+#' @param prob Interval mass used for the bars in draws mode (default .95).
+#' @param zero_line Draw a reference line at zero.
+#' @param zero_colour,zero_linewidth,zero_linetype Appearance of that line.
+#' @param density_linewidth,interval_linewidth,point_size Line and point
+#'   sizes for the densities, interval bars and point estimates.
+#' @param base_size Base font size passed to [ggplot2::theme_minimal()].
+#' @param title,subtitle,caption,xlab,ylab Passed to [ggplot2::labs()];
+#'   `caption` is the place for notes beneath the plot.
+#' @param legend Show the fill/colour legend. `FALSE` by default, since the
+#'   hyper/facet distinction is already carried by the vertical ordering.
+#' @return A `ggplot` object.
+#' @export
+DimSEM_plotRegressions <- function(object, ...,
+                                   covariates = NULL,
+                                   effects = c("direct", "total"),
+                                   hyper = NULL,
+                                   labels = NULL,
+                                   fill = c(hyper = "#2C5F8A",
+                                            facet = "#9EC1DC"),
+                                   colour = c(hyper = "grey20",
+                                              facet = "grey30"),
+                                   alpha = 0.85,
+                                   scale = 0.9,
+                                   interval = TRUE,
+                                   prob = 0.95,
+                                   zero_line = TRUE,
+                                   zero_colour = "grey55",
+                                   zero_linewidth = 0.3,
+                                   zero_linetype = 2,
+                                   density_linewidth = 0.35,
+                                   interval_linewidth = 0.6,
+                                   point_size = 1.6,
+                                   base_size = 11,
+                                   title = NULL, subtitle = NULL,
+                                   caption = NULL, xlab = NULL, ylab = NULL,
+                                   legend = FALSE) {
+  .dimsem_require_namespace("ggplot2")
+  effects <- match.arg(effects)
+  dots <- list(...)
+
+  # ---- resolve the input to either a draws frame or a summary table --------
+  is_summary_tab <- function(x) {
+    is.data.frame(x) && all(c("lhs", "op", "rhs", "est") %in% names(x))
+  }
+  draws <- NULL; tab <- NULL
+  if (inherits(object, "DimSEM_estimate")) {
+    if (is.null(hyper)) hyper <- names(object$hyper_blocks %||% list())
+    # Densities need draws; ask for them unless the caller said otherwise or
+    # the fit has no posterior to give.
+    if (is.null(dots$return)) {
+      dots$return <- if (identical(object$engine, "bayes")) "draws" else
+        "summary"
+    }
+    if (is.null(dots$prob)) dots$prob <- prob
+    res <- do.call(DimSEM_parameterEstimates, c(list(object), dots))
+    if (identical(dots$return, "draws")) draws <- res else tab <- res
+  } else if (is_summary_tab(object)) {
+    tab <- object
+    if (length(dots)) {
+      warning("`...` is only used when `object` is a DimSEM_estimate fit; ",
+              "ignoring: ", paste(names(dots), collapse = ", "),
+              call. = FALSE)
+    }
+  } else if (is.data.frame(object)) {
+    draws <- object
+    if (length(dots)) {
+      warning("`...` is only used when `object` is a DimSEM_estimate fit; ",
+              "ignoring: ", paste(names(dots), collapse = ", "),
+              call. = FALSE)
+    }
+  } else {
+    stop("`object` must be a DimSEM_estimate fit or a ",
+         "DimSEM_parameterEstimates() result.", call. = FALSE)
+  }
+
+  # ---- pick the rows/columns to plot --------------------------------------
+  key <- if (!is.null(draws)) .dimsem_parse_par(names(draws)) else
+    data.frame(name = ifelse(nzchar(tab$rhs) | tab$op == "~1",
+                             paste0(tab$lhs, tab$op, tab$rhs), tab$lhs),
+               lhs = tab$lhs, op = tab$op, rhs = tab$rhs,
+               stringsAsFactors = FALSE)
+
+  keep <- key$op == "~" & nzchar(key$rhs)
+  if (identical(effects, "total")) {
+    tot <- key$op == ":=" & grepl("_total$", key$lhs) & nzchar(key$rhs)
+    if (!any(tot)) {
+      stop("No `<factor>_total` rows found; effects = \"total\" needs a fit ",
+           "with a hyper-factor and covariates.", call. = FALSE)
+    }
+    # totals for the facets, plus the hyper row (which has no total of its own)
+    hyper_rows <- keep & key$lhs %in% (hyper %||% character(0))
+    keep <- tot | hyper_rows
+  }
+  if (!any(keep)) {
+    stop("No covariate regression rows found. Was the model fitted with ",
+         "`covariates`?", call. = FALSE)
+  }
+  key <- key[keep, , drop = FALSE]
+  key$factor <- sub("_total$", "", key$lhs)
+  if (!is.null(covariates)) {
+    miss <- setdiff(covariates, unique(key$rhs))
+    if (length(miss)) {
+      stop("Covariate(s) not in the fit: ", paste(miss, collapse = ", "),
+           call. = FALSE)
+    }
+    key <- key[key$rhs %in% covariates, , drop = FALSE]
+  }
+
+  # ---- ordering: hyper on top, then facets by number ----------------------
+  if (is.null(hyper)) hyper <- unique(key$factor[!grepl("^F[0-9]+$",
+                                                        key$factor)])
+  fac <- setdiff(unique(key$factor), hyper)
+  num <- suppressWarnings(as.numeric(sub("^F", "", fac)))
+  fac <- fac[order(ifelse(is.na(num), Inf, num), fac)]
+  ord <- c(intersect(hyper, unique(key$factor)), fac)   # top to bottom
+  n <- length(ord)
+  pos <- stats::setNames(rev(seq_len(n)), ord)          # 1 = bottom
+  key$pos <- pos[key$factor]
+  key$grp <- ifelse(key$factor %in% hyper, "hyper", "facet")
+
+  # ---- axis labels ---------------------------------------------------------
+  #
+  # Labels are carried as a LIST so that plotmath may be mixed with plain
+  # text. Passing a language object for one entry -- say
+  # bquote(bold("Generalized ideology") * " (hyper-factor)") -- lets part of a
+  # label be emphasized, which element_text() cannot do, since a fontface
+  # applies to the whole string. As soon as any entry is plotmath the whole
+  # vector is coerced to an expression, because ggplot2 will not mix the two;
+  # plain strings survive that unchanged, including characters like & and '
+  # which plotmath treats literally inside quotes.
+  lab <- as.list(ord)
+  if (!is.null(labels)) {
+    labs_l <- as.list(labels)
+    if (!is.null(names(labels))) {
+      hit <- match(ord, names(labels))
+      ok <- !is.na(hit)
+      lab[ok] <- labs_l[hit[ok]]
+    } else if (length(labels) == n) {
+      lab <- labs_l                                     # given top to bottom
+    } else {
+      stop("`labels` must be named, or an unnamed vector of length ", n,
+           " (one per row, top to bottom).", call. = FALSE)
+    }
+  }
+  is_expr <- function(z) is.language(z) || is.expression(z)
+  y_labels <- if (any(vapply(lab, is_expr, logical(1)))) {
+    as.expression(lapply(lab, function(z) {
+      if (is.expression(z) && length(z) == 1L) z[[1]] else z
+    }))
+  } else {
+    unlist(lab, use.names = FALSE)
+  }
+
+  aes_vals <- function(v) {
+    if (length(v) == 1L && is.null(names(v))) {
+      c(hyper = unname(v), facet = unname(v))
+    } else {
+      c(hyper = unname(v[["hyper"]]), facet = unname(v[["facet"]]))
+    }
+  }
+  fill <- aes_vals(fill); colour <- aes_vals(colour)
+  multi_cov <- length(unique(key$rhs)) > 1L
+
+  base <- ggplot2::ggplot() +
+    ggplot2::scale_y_continuous(breaks = rev(seq_len(n)), labels = y_labels,
+                                expand = ggplot2::expansion(add = c(0.4, 0.9))) +
+    ggplot2::scale_fill_manual(values = fill) +
+    ggplot2::scale_colour_manual(values = colour) +
+    ggplot2::labs(
+      title = title, subtitle = subtitle, caption = caption,
+      x = xlab %||% if (identical(effects, "total"))
+        "Total covariate effect" else "Covariate effect (direct)",
+      y = ylab %||% NULL) +
+    ggplot2::theme_minimal(base_size = base_size)
+  if (zero_line) {
+    base <- base + ggplot2::geom_vline(xintercept = 0,
+                                       linewidth = zero_linewidth,
+                                       colour = zero_colour,
+                                       linetype = zero_linetype)
+  }
+  if (!legend) base <- base + ggplot2::theme(legend.position = "none")
+  if (multi_cov) base <- base + ggplot2::facet_wrap(~ cov)
+
+  # ---- draws: stacked densities -------------------------------------------
+  if (!is.null(draws)) {
+    qs <- c((1 - prob) / 2, 1 - (1 - prob) / 2)
+    poly <- list(); bars <- list()
+    for (i in seq_len(nrow(key))) {
+      x <- as.numeric(draws[[key$name[i]]])
+      if (!length(x) || !stats::sd(x) > 0) {
+        # A parameter fixed by the model has no density to draw; mark its
+        # location with the interval bar alone rather than dropping the row.
+        bars[[length(bars) + 1L]] <- data.frame(
+          pos = key$pos[i], grp = key$grp[i], cov = key$rhs[i],
+          est = if (length(x)) x[1] else NA_real_,
+          lo = if (length(x)) x[1] else NA_real_,
+          hi = if (length(x)) x[1] else NA_real_,
+          stringsAsFactors = FALSE)
+        next
+      }
+      d <- stats::density(x)
+      h <- d$y / max(d$y) * scale
+      poly[[length(poly) + 1L]] <- data.frame(
+        x = c(d$x[1], d$x, d$x[length(d$x)]),
+        y = key$pos[i] + c(0, h, 0),
+        id = key$name[i], grp = key$grp[i], cov = key$rhs[i],
+        stringsAsFactors = FALSE)
+      bars[[length(bars) + 1L]] <- data.frame(
+        pos = key$pos[i], grp = key$grp[i], cov = key$rhs[i],
+        est = stats::median(x), lo = unname(stats::quantile(x, qs[1])),
+        hi = unname(stats::quantile(x, qs[2])), stringsAsFactors = FALSE)
+    }
+    poly <- do.call(rbind, poly); bars <- do.call(rbind, bars)
+    p <- base +
+      ggplot2::geom_polygon(
+        data = poly,
+        ggplot2::aes(x = .data$x, y = .data$y, group = .data$id,
+                     fill = .data$grp, colour = .data$grp),
+        alpha = alpha, linewidth = density_linewidth)
+    if (interval) {
+      p <- p +
+        ggplot2::geom_linerange(
+          data = bars,
+          ggplot2::aes(y = .data$pos, xmin = .data$lo, xmax = .data$hi,
+                       colour = .data$grp),
+          linewidth = interval_linewidth, na.rm = TRUE) +
+        ggplot2::geom_point(
+          data = bars,
+          ggplot2::aes(y = .data$pos, x = .data$est, colour = .data$grp),
+          size = point_size, na.rm = TRUE)
+    }
+    attr(p, "dimsem_mode") <- "density"
+    return(p)
+  }
+
+  # ---- summary / ML: dot and whisker --------------------------------------
+  idx <- match(key$name,
+               ifelse(nzchar(tab$rhs) | tab$op == "~1",
+                      paste0(tab$lhs, tab$op, tab$rhs), tab$lhs))
+  dw <- data.frame(pos = key$pos, grp = key$grp, cov = key$rhs,
+                   est = tab$est[idx], lo = tab$ci.lower[idx],
+                   hi = tab$ci.upper[idx], stringsAsFactors = FALSE)
+  p <- base +
+    ggplot2::geom_linerange(
+      data = dw,
+      ggplot2::aes(y = .data$pos, xmin = .data$lo, xmax = .data$hi,
+                   colour = .data$grp),
+      linewidth = interval_linewidth, na.rm = TRUE) +
+    ggplot2::geom_point(
+      data = dw,
+      ggplot2::aes(y = .data$pos, x = .data$est, fill = .data$grp,
+                   colour = .data$grp),
+      shape = 21, size = point_size * 1.75, stroke = 0.6, na.rm = TRUE)
+  attr(p, "dimsem_mode") <- "pointrange"
+  p
+}
+
 DimSEM_posterior <- function(object, pars = c("core", "all"), prob = 0.95) {
   if (!inherits(object, "DimSEM_estimate")) {
     stop("`object` must be a DimSEM_estimate object.", call. = FALSE)

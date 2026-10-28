@@ -140,7 +140,7 @@
 #' @param hyper_args Optional named list controlling the hyper-structure
 #'   evaluation, which uses a permutation-validated higher-order Louvain:
 #'   the null hypothesis that level-1 communities are mutually independent
-#'   conditional on their internal structure is simulated exactly by
+#'   conditional on their internal structure. Simulated by
 #'   permuting data rows independently within each community's column
 #'   block; the between-community edge mass of the re-estimated
 #'   regularized network (the between-community component of the

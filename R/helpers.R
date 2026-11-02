@@ -5685,8 +5685,8 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
           } else {
             add(g, "=~", fk,
                 dr(s_delta(array(1, dim(SC$sd_eta[, , k,
-                                                             drop = FALSE])),
-                                      k, gi)))
+                                                  drop = FALSE])),
+                           k, gi)))
           }
         }
       }
@@ -5732,8 +5732,19 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
       tg <- grab("tau_g")
       if (!is.null(tg)) {
         for (gi in seq_along(names(blocks))) {
+          # standardize = "none" leaves SC NULL, so there is no model-implied
+          # variance to divide by: the row is the raw hyper-disturbance
+          # variance tau_g^2. Without this branch SC$var_G is NULL, the
+          # division in s_psi_G() collapses to numeric(0), and as_draws_array()
+          # rejects it ("Don't know how to transform an object of class
+          # 'numeric' to any supported draws format"). The free-loading branch
+          # below already guards the same call.
           add(names(blocks)[gi], "~~", names(blocks)[gi],
-              dr(s_psi_G(tg[, , gi, drop = FALSE]^2, gi)))
+              dr(if (is.null(SC)) {
+                tg[, , gi, drop = FALSE]^2
+              } else {
+                s_psi_G(tg[, , gi, drop = FALSE]^2, gi)
+              }))
         }
       }
     } else {
@@ -5743,7 +5754,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
         } else {
           add(names(blocks)[gi], "~~", names(blocks)[gi],
               dr(s_psi_G(array(1, dim(SC$var_G[, , gi,
-                                                          drop = FALSE])), gi)))
+                                               drop = FALSE])), gi)))
         }
       }
     }
@@ -5772,7 +5783,7 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
             if (!is.na(idx)) {
               add(names(blocks)[gi], "~", map$covariates[q],
                   dr(s_beta(bg[, , idx, drop = FALSE], q, gi,
-                                       on_G = TRUE)))
+                            on_G = TRUE)))
             }
           }
         }

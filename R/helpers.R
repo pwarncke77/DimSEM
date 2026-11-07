@@ -5877,6 +5877,34 @@ DimSEM_parameterEstimates <- function(object, prob = 0.95,
   out
 }
 
+# --- Posterior summary of one parameter ---------------------------------------
+#
+# Mean, SD, central interval and convergence diagnostics of one parameter's
+# draws. `a` holds the draws as an iterations x chains (x 1) array, a
+# draws_array or a plain base array. The diagnostics are computed on an
+# iterations x chains MATRIX: posterior's rhat()/ess_bulk()/ess_tail() read a
+# matrix column by column as chains, but flatten any 3-d array to a single
+# column first, which merges all chains into one and understates R-hat (and
+# misstates ESS) whenever the chains disagree.
+.dimsem_draw_summary <- function(a, qs = c(0.025, 0.975)) {
+  m <- as.numeric(a)
+  d <- dim(a)
+  if (length(d) > 2L && prod(d[-(1:2)]) != 1L) {
+    stop("Expected the draws of a single parameter.", call. = FALSE)
+  }
+  by_chain <- if (length(d) >= 2L) {
+    matrix(m, nrow = d[1], ncol = d[2])   # draws are stored chain by chain
+  } else {
+    matrix(m, ncol = 1L)
+  }
+  c(est = mean(m), se = stats::sd(m),
+    ci.lower = unname(stats::quantile(m, qs[1])),
+    ci.upper = unname(stats::quantile(m, qs[2])),
+    rhat = posterior::rhat(by_chain),
+    ess_bulk = posterior::ess_bulk(by_chain),
+    ess_tail = posterior::ess_tail(by_chain))
+}
+
 
 # --- Item-level orphan audit -------------------------------------------------------
 #
